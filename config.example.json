@@ -1,0 +1,9 @@
+{
+  "guild_id": "YOUR_DISCORD_SERVER_ID",
+  "channel_id": "SIGNALS_CHANNEL_ID",
+  "trader_id": "AUTHORIZED_TRADER_USER_ID",
+  "signal_ttl_seconds": 60,
+  "accounts": {
+    "follower-demo-1": "REPLACE_WITH_SHA256_OF_RANDOM_AGENT_TOKEN"
+  }
+}

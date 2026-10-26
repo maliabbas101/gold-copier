@@ -1,30 +1,20 @@
-# Gold Community Copier — v0.1
+# Gold Copier — community trading platform
 
-A working software MVP for copying one authorized trader's Discord XAUUSD signals to multiple independent MT5 **demo** accounts. This project includes a Discord listener, an authenticated queue API, a Windows MT5 worker, durable execution journals, and automated tests. It has not been exercised against a real MT5 terminal in this environment. Live account support is deliberately disabled pending demo acceptance and production hardening.
+A full-stack XAUUSD community copier with a responsive member dashboard, browser authentication, individual MT5 accounts, analyst feeds, risk controls, trade management, subscriptions, and a managed Windows terminal pool.
 
-## Architecture
+**This branch is `feature/community-platform`. `main` retains the original backend-only MVP.** The interface is an original implementation of the public feature set, not a copy of Inspired Analyst's private dashboard or source code.
 
-Discord bot → shared SQLite queue ← HTTPS polling workers → dedicated MT5 terminals.
+## Where is the frontend?
 
-Run API and Discord listener on the same machine against the same local SQLite file. Each consenting follower runs a worker on Windows beside a separate MT5 terminal already logged into their demo account. Credentials remain in MT5. A worker token can claim only that follower's jobs. Exness and PrimeXBT **MT5** accounts use this adapter; PrimeXBT PXTrader and MT4 are not implemented.
+The frontend is in [`goldcopier/web/`](goldcopier/web/): HTML, CSS, and JavaScript served directly by FastAPI. There is no separate frontend build or Node runtime needed to run the application. Node is used only for frontend tests.
 
-## Exact signal format
+- Open [`docs/frontend-preview.html`](docs/frontend-preview.html) after downloading it for a self-contained, read-only preview. Select **Explore live demo** on the landing page.
+- For the actual running app, start the local demo below and open **http://127.0.0.1:8000/#demo**.
+- Optional operator sign-in uses `demo@goldcopier.local`; the launcher stores its generated password in `.demo/access-password`. Demo data are explicitly labelled and **no broker jobs can be claimed in demo mode**.
 
-```text
-XAUUSD BUY
-ENTRY: 2700
-SL: 2695
-TP: 2710
-BE: 2705
-```
+## Start the frontend and backend together
 
-For a sell, require `TP < BE < ENTRY < SL`. For a buy, require `SL < ENTRY < BE < TP`. BE means a **price trigger**: once the executable exit quote reaches it, move SL to that position's actual entry. This is price breakeven, excluding commission, swap, and slippage.
-
-One market entry, one TP, one stop loss, one BE trigger. ENTRY is a reference price; the worker executes at market only within its configured tolerance. There are no pending entries or delayed waits for price. Price ranges, multiple targets, images, embeds, edits, partial closes, cancellations from Discord, and free-form “move BE” messages are rejected or ignored. Adapt the strict parser only after collecting actual trader examples and expected behavior.
-
-## 1. Install and test
-
-Python 3.11+:
+Python 3.11 or 3.12:
 
 ```bash
 python -m venv .venv
@@ -32,88 +22,41 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.lock.txt
 pip install -e . --no-deps
-pytest -q
-python -m goldcopier.demo
+python -m goldcopier.launch --demo
 ```
 
-`requirements.lock.txt` records the versions tested here. MetaTrader5 is separate and Windows-only: on the worker run `pip install '.[mt5]'`. The offline demo uses a simulated broker, not live market data or an MT5 connection.
+Open **http://127.0.0.1:8000/** for the landing page, **/#demo** for the read-only sample workspace, or **/#login** to sign in and edit demo settings. Demo initialization uses a separate `.demo` state directory. It does not connect to a broker, require broker credentials, or enable payments.
 
-## 2. Configure the service
+## Included
 
-Copy `config.example.json` to `config.json`. Set guild, channel, and trader IDs from Discord Developer Mode. Every follower gets a different high-entropy token. Generate an admin token and each agent token separately:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
-
-Store raw tokens only in local environment variables or your secret manager. Hash each agent token with SHA256 and put only its 64-character hex digest in `config.json` under a unique follower ID. To hash securely without terminal history, use:
-
-```bash
-python -c "import getpass,hashlib; print(hashlib.sha256(getpass.getpass('Agent token: ').encode()).hexdigest())"
-```
-
-Set `COPIER_ADMIN_TOKEN`, `DISCORD_BOT_TOKEN`, optional `COPIER_CONFIG`, and optional `COPIER_DB` in the service's environment. `.env` files are not automatically loaded. Never commit tokens, account settings, databases, or terminal passwords.
-
-Create a Discord bot, add it to the server with permission to view the signal channel, and enable its privileged **Message Content Intent** in the Developer Portal. Additional Discord approval may apply to verified bots. The bot only listens; it does not post messages or fetch old signals. It accepts only the configured trader, guild, and channel and ignores webhook/bot messages.
-
-Start two processes from the project folder with the same working directory/config/database:
-
-```bash
-uvicorn goldcopier.server:create_app --factory --host 127.0.0.1 --port 8000
-python -m goldcopier.discord_bot
-```
-
-Expose API access through a maintained HTTPS reverse proxy with request-size limits, rate limits, and access controls; do not expose plain HTTP externally. SQLite must be on local storage, not a network share. Keep both service processes single-host. The API starts **paused** on a new database. Pause state persists across restarts.
-
-Admin API (all require `Authorization: Bearer <admin token>`):
-
-| Endpoint | Purpose |
+| Area | Implementation |
 | --- | --- |
-| `GET /admin/status` | Pause status and latest 100 follower jobs/results |
-| `POST /admin/preview` | Parse `{"text":"..."}` without queueing or trading |
-| `POST /admin/pause` | `{"paused":false}` enables intake/claims; `true` cancels queued jobs |
+| Frontend | Landing page, signup/login/password reset, dashboard, account wizard, analysts, risk settings, trade controls/history, activity, billing, settings, operator console |
+| Account security | Scrypt password hashes; hashed opaque session/worker tokens; HttpOnly/SameSite cookies; CSRF and Origin checks; login throttling; AES-256-GCM encryption of stored MT5 passwords |
+| Account onboarding | Self-hosted or managed terminal assignment, explicit account-owner consent, worker verification, per-account token rotation and credential revocation |
+| Signals | XAUUSD market/limit/stop orders, exact entry or market entry ranges, single or multiple targets, BE, referenced close/cancel/partial/update commands, authorized Discord text edits |
+| Risk | Percentage, account-currency cash, or fixed-lot sizing; percentage/lot caps; daily equity loss stop; persisted high-water drawdown; aggregate exposure and concurrent-position limits; spread and entry filters |
+| Management | Actual-fill BE; durable partial-exit stages; TP1/TP2 and runners; manual SL/TP adjustment protection; pending cancellation/modification; broker position reconciliation by comment or order history |
+| Reliability | Atomic single claims, durable local submission journals, acknowledgement retry, uncertainty blocks, operator reconciliation without order replay, worker heartbeats and activity alerts |
+| Billing | Stripe Checkout, billing portal, signed/idempotent subscription webhooks, authoritative subscription retrieval, entitlement checks at intake/start/claim |
+| Managed execution | Dedicated Windows MT5 terminal pool, one worker per account, encrypted credential provisioning, persistent account-to-slot assignment |
+| Analyst sources | Authorized Discord feeds; optional read-only MT5 master-position bridge |
+| Deployment | Non-root Docker image, Compose, Caddy HTTPS example, database backups, supervised recovery instructions |
 
-For example, in PowerShell with `COPIER_ADMIN_TOKEN` set:
+## Verification
 
-```powershell
-$headers = @{Authorization = "Bearer $env:COPIER_ADMIN_TOKEN"}
-Invoke-RestMethod http://127.0.0.1:8000/admin/status -Headers $headers
-Invoke-RestMethod http://127.0.0.1:8000/admin/pause -Method Post -Headers $headers -ContentType 'application/json' -Body '{"paused":false}'
+```bash
+pytest -q
+npm ci --ignore-scripts
+npm test
 ```
 
-## 3. Configure each MT5 demo worker
+Python tests cover account isolation, authentication/CSRF, vault binding, webhook signatures and entitlements, signal fanout, demo/live gates, broker guards, partial exits, manual stop preservation, duplicate prevention, interrupted submissions, and reconciliation. DOM tests exercise the real frontend source, navigation, account wizard, risk-form payloads, trade review, read-only demo controls, and HTML escaping. The preview embeds labelled sample data; it does not replace the authenticated API in the real application.
 
-1. Install and log into a **dedicated hedging demo account** in its own Windows MT5 terminal installation. Enable algorithmic trading and external Python trading. Keep the terminal running.
-2. Copy `agent.example.json` to `agent.json`. Set the exact terminal executable, expected login/server, and exact gold symbol (e.g. broker suffix `XAUUSDm`). Only map the broker's actual XAUUSD contract here.
-3. Set follower-specific risk percent, max lots, spread, entry-distance, and broker-supported filling mode. Example settings are illustrative, not recommended trading parameters. `max_spread` and `max_entry_distance` are gold **price units**, while `deviation_points` uses the broker's point size. `filling_mode` is an MT5 enum: 0 FOK, 1 IOC, 2 RETURN; verify broker support. Unsupported modes are rejected by preflight.
-4. Set `COPIER_URL` to the HTTPS API URL and `AGENT_TOKEN` to that follower's raw token.
-5. Start `python -m goldcopier.agent`. Use a separate working directory, journal, token, and terminal for every follower. Never run two workers for one account, including across different machines. The lock file only protects one local journal.
+**Actual MT5/Windows execution, Stripe test-mode checkout, SMTP delivery, Docker deployment, and browser visual/responsive QA still require environment-specific acceptance.** Automated broker tests use a fake MT5 API. Do not interpret passing tests as broker certification or a production uptime guarantee.
 
-No account password is sent to the service. The worker verifies account login/server, demo mode, hedging mode, trade permissions, quote freshness, broker preflight, and account exposure before entry. Existing positions or pending orders anywhere on the dedicated account block another trade. Initial position size uses `order_calc_profit` in account currency, equity risk, and broker lot step/min/max; it rounds down or skips a trade below the minimum lot. Risk percent is capped at 1% in v0.1. Stops and slippage do not guarantee a maximum realized loss.
+## Deployment and operation
 
-## Pause and failure behavior
+See [`docs/PLATFORM.md`](docs/PLATFORM.md) for production setup, worker/pool configuration, billing, Discord grammar, risk semantics, and recovery. See [`docs/FEATURES.md`](docs/FEATURES.md) for the explicit feature comparison and remaining limits. The original v0.1 setup is preserved in [`docs/LEGACY_MVP.md`](docs/LEGACY_MVP.md); new installations should use the platform app rather than the legacy server.
 
-- Central pause cancels queued jobs and stops future intake/claims. A previously claimed or already submitted order can still execute. Pause does not close open positions.
-- Create a local file named `PAUSE` in a worker's working directory to stop new entries there. Breakeven monitoring continues.
-- SL and TP are sent with the opening order and managed by the broker after acceptance. BE requires the local worker/terminal and fresh quotes to remain available.
-- Discord IDs are durable deduplication keys. Identical signal payloads posted under different IDs are suppressed during their TTL. Reposting later can create a new trade.
-- Jobs are claimed atomically once. A lost claim response leaves the job `claimed`; it is not leased or redelivered. This deliberately favors missed trades over duplicate trades.
-- A worker persists intent before broker submission and stores results before acknowledging. A lost acknowledgement is retried without placing another trade.
-- Broker timeout, partial fill, non-DONE response, or interrupted submission becomes `uncertain`. That worker blocks new entries until an operator reconciles broker positions and deal/order history. BE monitoring still attempts to protect matching copier positions, including uncertain partial fills.
-- No automatic uncertain-order resolution or resend is provided. Do not delete journals to clear a block. Preserve records, inspect MT5 history, and make a reviewed recovery decision. A stopped/crashed worker can leave a `.lock`; remove it only after verifying its process is no longer running.
-- In v0.1, completed trade records remain in the local BE monitor scan. Archive/reconciliation tooling and monitoring-scale improvements are production follow-up work.
-
-## Demo acceptance before extending to live accounts
-
-Use two broker demo accounts and a test Discord channel. Confirm buy/sell entries, lot rounding, broker symbol suffix/filling mode, actual-fill BE movement and SL/TP preservation, follower token isolation, paused intake, stale messages, duplicate signals, wide spreads, price gaps, account switching, disconnects, partial fills, and restart around submission/acknowledgement. Compare central logs, local journals, and MT5 deal history. Confirm BE can identify positions using the copier magic/comment on your broker; brokers may alter comments, in which case automatic BE needs a reconciled position mapping.
-
-Production work still needed: broker-tested durable deal-to-position reconciliation, follower consent/onboarding and revocation, secret rotation, deployment/service supervision, alerts, daily loss and equity-drawdown limits, operator recovery UI, load testing, and any requirements applicable to operating the community service. This is an integration MVP, not a deployed or production-approved trading system.
-
-## Reference documentation
-
-- [MetaQuotes Python integration](https://www.mql5.com/en/docs/python_metatrader5)
-- [MT5 order submission](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersend_py)
-- [MT5 profit/loss estimation](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercalcprofit_py)
-- [Official Discord gateway documentation](https://github.com/discord/discord-api-docs/blob/main/developers/events/gateway.mdx)
-- [Exness MT5 settings](https://get.exness.help/hc/en-us/articles/12325499337756-MT5-Settings-and-preferences)
-- [PrimeXBT MT5 accounts](https://primexbt.com/platforms/mt5/pro)
+The service is not deployed by committing this branch. Live execution is disabled by default and requires **both** server and worker enablement, explicit account consent, broker demo acceptance, and operator-managed infrastructure. Only MT5 accounts are supported; MT4 and PrimeXBT PXTrader are separate integrations.

@@ -60,3 +60,24 @@ Python tests cover account isolation, authentication/CSRF, vault binding, webhoo
 See [`docs/PLATFORM.md`](docs/PLATFORM.md) for production setup, worker/pool configuration, billing, Discord grammar, risk semantics, and recovery. See [`docs/FEATURES.md`](docs/FEATURES.md) for the explicit feature comparison and remaining limits. The original v0.1 setup is preserved in [`docs/LEGACY_MVP.md`](docs/LEGACY_MVP.md); new installations should use the platform app rather than the legacy server.
 
 The service is not deployed by committing this branch. Live execution is disabled by default and requires **both** server and worker enablement, explicit account consent, broker demo acceptance, and operator-managed infrastructure. Only MT5 accounts are supported; MT4 and PrimeXBT PXTrader are separate integrations.
+
+## Windows account administration
+
+This application uses FastAPI and SQLite, so Django's `get_user_model()` and
+`manage.py shell` do not apply. Python statements pasted directly into PowerShell
+produce the `from keyword is not supported` error.
+
+To create an operator account, run this from the project directory in PowerShell:
+
+```powershell
+.\venv\Scripts\python.exe -m goldcopier.manage create-admin --email you@example.com --name "Your Name"
+```
+
+The command prompts for a password (at least 12 characters). Set `PLATFORM_DB` to
+the same database used by the running app before running it. Ordinary members can
+use **Create account** in the browser. After creating an operator, sign in through
+`/#login`; the app uses an HttpOnly session cookie and does not require a manually
+created browser token. Worker tokens are separate and only authenticate MT5 workers.
+
+For frontend tests in PowerShell, use `npm.cmd ci --ignore-scripts` and
+`npm.cmd test` if the execution policy blocks `npm.ps1`.

@@ -4,7 +4,7 @@
 
 - `goldcopier.platform`: FastAPI application and bundled frontend. Browser session cookies never carry broker passwords.
 - `goldcopier.platform_store`: transactional SQLite state and audit events. Use a separate `PLATFORM_DB`, not the legacy v0.1 database.
-- `goldcopier.discord_platform`: reads allowlisted human Discord authors/channels, sharing the web database on the same host.
+- `goldcopier.discord_platform`: reads allowlisted human or bot Discord authors/channels, sharing the web database on the same host.
 - `goldcopier.platform_agent`: one Windows worker and one dedicated MT5 terminal per follower. Journals, automatic-exit state, and risk baselines persist locally.
 - `goldcopier.supervisor`: an optional operator-managed Windows pool of preinstalled terminal slots. A follower can select managed hosting when the operator configures it.
 - `goldcopier.master_bridge`: optional read-only MT5 analyst source, independent of the follower terminal pool.
@@ -119,6 +119,10 @@ PERCENT: 50
 ```
 
 `CLOSE SIGNAL: 123456789` closes matching open positions. `CANCEL SIGNAL: 123456789` cancels matching pending orders. Neither is interpreted as the other. The reference must belong to the same analyst feed. Invalid formats, images/embeds, ambiguous instructions, unrelated instruments, and unauthorized authors are ignored/rejected.
+
+An analyst can be a human Discord user or a signal bot. In **Operator console / Add authorized analyst**, enter that author's user ID together with the exact server (guild) and channel IDs. Each member follows that analyst for each MT5 account and enables copying after the worker connects. The same authorization and signal parser apply to both author types. Unconfigured authors, webhooks, DMs, and messages from the listener itself are ignored. Bots must put the supported signal text in message content; embed/image-only signals are not parsed.
+
+Orders follow this path: **Discord author -> configured analyst -> following, enabled accounts -> account worker queue -> Windows MT5 terminal -> broker**. The broker label (including Exness) does not select a website integration. Workers use the MetaTrader5 Python API, not the Exness website or browser automation. Broker/terminal trading permissions, risk limits, freshness, and operator gates still apply; a signal cannot force an order past those checks.
 
 Discord text edits propagate only SL/final-TP changes to an already ingested entry. An entry-price/side/type edit never creates a second trade. Changes to TP1/BE/range semantics require a new explicit supported instruction; post deletion never means cancel/close.
 

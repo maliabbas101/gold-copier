@@ -373,3 +373,108 @@ def test_disconnect_requires_fresh_flat_account_and_revokes_token(workspace):
     workspace.store.set_enabled(workspace.owner, a, False)
     assert workspace.client.delete(f"/api/accounts/{a}").status_code == 200
     assert workspace.store.agent(token) is None
+
+
+def discord_message(bot=False):
+    from datetime import datetime, timezone
+
+    return Obj(
+        id=9001, guild=Obj(id=1), channel=Obj(id=2),
+        author=Obj(id=3, bot=bot), webhook_id=None, content=TEXT,
+        created_at=datetime.now(timezone.utc), edited_at=None,
+    )
+
+
+@pytest.mark.parametrize('bot', [False, True], ids=['human', 'bot'])
+def test_discord_followed_analyst_executes_through_mt5(workspace, tmp_path, bot):
+    from goldcopier.discord_platform import ingest
+    from goldcopier.broker_v2 import PlatformBroker, MAGIC
+    from goldcopier.platform_agent import Ledger, execute
+    from test_worker_v2 import BrokerMT
+
+    w = workspace
+    account_id = add_account(w)
+    token, agent = worker_ready(w, account_id)
+    # A second healthy account does not follow this analyst.
+    other_id = add_account(w, login='87654321')
+    _, other_agent = worker_ready(w, other_id)
+    w.store.set_enabled(w.owner, other_id, False)
+    w.store.follow(w.owner, other_id, w.analyst, False)
+    other_analyst = w.store.add_analyst({
+        'name': 'Other analyst', 'description': '', 'guild_id': '1',
+        'channel_id': '2', 'trader_id': '4', 'active': True,
+    })
+    w.store.follow(w.owner, other_id, other_analyst, True)
+    w.store.set_enabled(w.owner, other_id, True)
+    message = discord_message(bot)
+    assert ingest(w.store, message, listener_id=999)[0]['queued'] == 1
+    assert ingest(w.store, message, listener_id=999)[0]['duplicate']
+    assert w.store.claim(other_agent) is None
+    job = w.store.claim(agent)
+    assert job and job['signal']['action'] == 'entry'
+
+    mt = BrokerMT()
+    mt.account.login = int(agent['login'])
+    mt.account.server = agent['server']
+    broker = PlatformBroker({
+        'terminal_path': 'terminal.exe', 'login': agent['login'],
+        'server': agent['server'], 'symbol': agent['symbol'], 'mode': 'demo',
+        'allow_live': False, 'baseline': {}, 'filling_mode': 1,
+    }, mt)
+    ledger = Ledger(tmp_path / 'discord-worker.db')
+    try:
+        execute(job, broker, ledger)
+        assert len(mt.sent) == 1
+        assert mt.sent[0]['action'] == mt.TRADE_ACTION_DEAL
+        assert mt.sent[0]['symbol'] == agent['symbol']
+        assert mt.sent[0]['magic'] == MAGIC
+        with pytest.raises(ValueError, match='Duplicate'):
+            execute(job, broker, ledger)
+        assert len(mt.sent) == 1
+    finally:
+        ledger.db.close()
+
+
+@pytest.mark.parametrize('bot', [False, True], ids=['human', 'bot'])
+@pytest.mark.parametrize('change', ['guild', 'channel', 'author', 'webhook', 'dm', 'self', 'inactive'])
+def test_discord_rejects_unconfigured_sources(workspace, bot, change):
+    from goldcopier.discord_platform import ingest
+
+    w = workspace
+    worker_ready(w, add_account(w))
+    message = discord_message(bot)
+    listener_id = 999
+    if change == 'guild': message.guild.id = 99
+    if change == 'channel': message.channel.id = 99
+    if change == 'author': message.author.id = 99
+    if change == 'webhook': message.webhook_id = 99
+    if change == 'dm': message.guild = None
+    if change == 'self': listener_id = message.author.id
+    if change == 'inactive':
+        with w.store.db() as db:
+            db.execute('UPDATE analysts SET active=0 WHERE id=?', (w.analyst,))
+    assert ingest(w.store, message, listener_id=listener_id) == []
+    with w.store.db() as db:
+        assert db.execute('SELECT COUNT(*) FROM feeds').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM pjobs').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('bot', [False, True], ids=['human', 'bot'])
+def test_discord_edits_update_protection_without_new_entries(workspace, bot):
+    from datetime import datetime, timezone
+    from goldcopier.discord_platform import ingest
+
+    w = workspace
+    worker_ready(w, add_account(w))
+    message = discord_message(bot)
+    assert ingest(w.store, message)[0]['queued'] == 1
+    message.content = TEXT.replace('SL: 2695', 'SL: 2696')
+    message.edited_at = datetime.now(timezone.utc)
+    assert ingest(w.store, message, edit=True)[0]['queued'] == 1
+    assert ingest(w.store, message, edit=True)[0]['duplicate']
+    message.content = message.content.replace('2700 - 2701', '2699 - 2701')
+    message.edited_at = datetime.now(timezone.utc)
+    assert ingest(w.store, message, edit=True) == []
+    with w.store.db() as db:
+        actions = [json.loads(r[0])['action'] for r in db.execute('SELECT payload FROM pjobs ORDER BY created')]
+    assert actions == ['entry', 'modify']

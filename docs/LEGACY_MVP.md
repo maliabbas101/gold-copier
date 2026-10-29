@@ -54,7 +54,7 @@ python -c "import getpass,hashlib; print(hashlib.sha256(getpass.getpass('Agent t
 
 Set `COPIER_ADMIN_TOKEN`, `DISCORD_BOT_TOKEN`, optional `COPIER_CONFIG`, and optional `COPIER_DB` in the service's environment. `.env` files are not automatically loaded. Never commit tokens, account settings, databases, or terminal passwords.
 
-Create a Discord bot, add it to the server with permission to view the signal channel, and enable its privileged **Message Content Intent** in the Developer Portal. Additional Discord approval may apply to verified bots. The bot only listens; it does not post messages or fetch old signals. It accepts only the configured trader, guild, and channel and ignores webhook/bot messages.
+Create a Discord bot, add it to the server with permission to view the signal channel, and enable its privileged **Message Content Intent** in the Developer Portal. Additional Discord approval may apply to verified bots. The bot only listens; it does not post messages or fetch old signals. It accepts only the configured trader, guild, and channel and accepts either human or bot authors matching those IDs. It ignores webhooks and its own messages.
 
 Start two processes from the project folder with the same working directory/config/database:
 

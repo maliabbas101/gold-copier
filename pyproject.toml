@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gold-community-copier"
-version = "0.1.0"
+version = "0.2.0"
 description = "Discord XAUUSD signals to isolated MT5 follower agents"
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "httpx>=0.27,<1", "discord.py>=2.4,<3"]
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "httpx>=0.27,<1", "discord.py>=2.4,<3", "cryptography>=43,<47", "stripe>=11,<15"]
 
 [project.optional-dependencies]
 mt5 = ["MetaTrader5>=5.0; sys_platform == 'win32'"]
@@ -18,3 +18,6 @@ include = ["goldcopier*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+goldcopier = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]

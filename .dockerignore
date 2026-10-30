@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+*.db*
+*.lock
+*.egg-info
+__pycache__
+.pytest_cache
+pytest-of-root
+pool-state
+artifacts
+node_modules
+preview*
+master-state.json
+.demo

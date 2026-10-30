@@ -6,7 +6,7 @@ from goldcopier.discord_bot import authorized_message
 
 
 @pytest.mark.parametrize('change', ['none', 'guild', 'channel', 'trader', 'bot', 'webhook', 'dm'])
-def test_only_allowlisted_human_trader(change):
+def test_only_allowlisted_human_or_bot_trader(change):
     cfg = {'guild_id':'1','channel_id':'2','trader_id':'3'}
     message = Obj(guild=Obj(id=1), channel=Obj(id=2), author=Obj(id=3, bot=False), webhook_id=None)
     if change == 'guild': message.guild.id = 99
@@ -15,4 +15,10 @@ def test_only_allowlisted_human_trader(change):
     if change == 'bot': message.author.bot = True
     if change == 'webhook': message.webhook_id = 99
     if change == 'dm': message.guild = None
-    assert authorized_message(message, cfg) is (change == 'none')
+    assert authorized_message(message, cfg) is (change in ('none', 'bot'))
+
+
+def test_listener_never_copies_its_own_messages():
+    cfg = {'guild_id': '1', 'channel_id': '2', 'trader_id': '3'}
+    message = Obj(guild=Obj(id=1), channel=Obj(id=2), author=Obj(id=3, bot=True), webhook_id=None)
+    assert not authorized_message(message, cfg, listener_id=3)

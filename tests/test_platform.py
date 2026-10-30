@@ -155,6 +155,20 @@ def test_vault_is_account_bound_and_not_exposed(workspace, monkeypatch):
         vault.decrypt(ciphertext, "other-account")
 
 
+def test_self_hosted_password_is_not_stored_or_returned(workspace):
+    w = workspace
+    ident = add_account(w, password="accidentally-filled-password")
+    token = w.client.post(f"/api/accounts/{ident}/token").json()["token"]
+    assert w.store.account(w.owner, ident)["secret"] is None
+    # An older record might already contain a password; never send it to a
+    # self-hosted worker, which should use the manually logged-in terminal.
+    with w.store.db() as db:
+        db.execute("UPDATE accounts SET secret=? WHERE id=?", ("legacy-secret", ident))
+    config = w.client.get("/api/worker/config", headers={"Authorization": "Bearer " + token})
+    assert config.status_code == 200
+    assert config.json()["password"] is None
+
+
 def test_live_gate_and_unverified_start(workspace):
     body = {
         "name": "Live",
@@ -168,6 +182,69 @@ def test_live_gate_and_unverified_start(workspace):
     a = add_account(workspace)
     r = workspace.client.post(f"/api/accounts/{a}/enabled", json={"enabled": True})
     assert r.status_code == 400 and "healthy" in r.text
+
+
+def test_connect_selects_analyst_but_never_starts_copying_early(workspace):
+    w = workspace
+    ident = add_account(w, analyst_id=w.analyst)
+    row = w.store.dashboard(w.owner)["accounts"][0]
+    assert row["follows"][0]["analyst_id"] == w.analyst
+    assert row["enabled"] == 0
+    assert w.client.post(f"/api/accounts/{ident}/enabled", json={"enabled": True}).status_code == 400
+
+
+def test_connect_rejects_inactive_analyst_without_leaving_an_account(workspace):
+    w = workspace
+    with w.store.db() as db:
+        db.execute("UPDATE analysts SET active=0 WHERE id=?", (w.analyst,))
+    response = w.client.post("/api/accounts", json={
+        "name": "Gold", "broker": "Exness", "login": "12345678", "server": "Demo",
+        "symbol": "XAUUSD", "mode": "demo", "hosting": "self", "consent": True,
+        "analyst_id": w.analyst,
+    })
+    assert response.status_code == 400
+    assert w.store.dashboard(w.owner)["accounts"] == []
+
+
+@pytest.mark.parametrize("bot", [False, True], ids=["human", "bot"])
+def test_connect_auto_worker_start_copy_then_signal_reaches_mt5(workspace, tmp_path, monkeypatch, bot):
+    from goldcopier import runtime
+    from goldcopier.discord_platform import ingest
+    from goldcopier.platform_agent import Ledger, execute
+    from goldcopier.broker_v2 import PlatformBroker
+    from test_worker_v2 import BrokerMT
+
+    w = workspace
+    for name in ("AGENT_TOKEN", "LOCAL_ACCOUNT_ID", "WORKER_STATE"):
+        monkeypatch.delenv(name, raising=False)
+    ident = add_account(w, analyst_id=w.analyst)
+    started = []
+    monkeypatch.setattr(runtime, "start_child", lambda *a, **kw: started.append(kw) or Obj(poll=lambda: None))
+    runtime.LocalWorker(w.store, tmp_path / "runtime", "terminal.exe").tick()
+    headers = {"Authorization": "Bearer " + started[0]["env"]["AGENT_TOKEN"]}
+    cfg = w.client.get("/api/worker/config", headers=headers).json()
+    assert cfg["account_id"] == ident and cfg["enabled"] is False
+    response = w.client.post("/api/worker/heartbeat", headers=headers, json={
+        "login": cfg["login"], "server": cfg["server"], "mode": "demo",
+        "balance": 10000, "equity": 10000, "currency": "USD", "daily_pnl": 0,
+        "positions": [], "orders": [],
+    })
+    assert response.status_code == 200, response.text
+    assert w.client.post(f"/api/accounts/{ident}/enabled", json={"enabled": True}).status_code == 200
+    assert w.client.post("/api/worker/claim", headers=headers).json() is None
+    assert ingest(w.store, discord_message(bot))[0]["queued"] == 1
+    job = w.client.post("/api/worker/claim", headers=headers).json()
+    mt = BrokerMT()
+    mt.account.login, mt.account.server = int(cfg["login"]), cfg["server"]
+    cfg.update(terminal_path="terminal.exe", filling_mode=1, baseline={})
+    ledger = Ledger(tmp_path / "copy-worker.db")
+    try:
+        execute(job, PlatformBroker(cfg, mt), ledger)
+        assert len(mt.sent) == 1
+        assert mt.sent[0]["action"] == mt.TRADE_ACTION_DEAL
+        assert mt.sent[0]["symbol"] == cfg["symbol"]
+    finally:
+        ledger.db.close()
 
 
 def test_signal_fanout_duplicate_and_account_bound_result(workspace):

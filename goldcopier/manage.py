@@ -180,12 +180,24 @@ def seed_demo(store, password):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=["key", "create-admin", "seed-demo", "backup"]
+        "command", choices=["run", "key", "create-admin", "seed-demo", "backup"]
     )
     parser.add_argument("--email")
     parser.add_argument("--name", default="Community Operator")
     parser.add_argument("--output")
+    parser.add_argument("--env-file", default=".env")
     args = parser.parse_args()
+    from .runtime import load_env
+
+    if args.command == "run":
+        from .runtime import main as run
+
+        try:
+            run(args.env_file)
+        except (ValueError, OSError) as exc:
+            parser.exit(1, f"Startup failed: {exc}\n")
+        return
+    load_env(args.env_file)
     if args.command == "key":
         print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
         return

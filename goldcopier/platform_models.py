@@ -27,6 +27,7 @@ class AccountInput(Model):
     symbol: str = Field(default="XAUUSD", pattern=r"^XAUUSD[A-Za-z0-9._-]{0,12}$")
     mode: Literal["demo", "live"] = "demo"
     hosting: Literal["self", "managed"] = "self"
+    analyst_id: str | None = Field(default=None, min_length=1, max_length=64)
     password: str = Field(default="", max_length=128)
     consent: Literal[True]
 

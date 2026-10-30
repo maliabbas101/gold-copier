@@ -345,17 +345,37 @@ def monitor(broker, ledger, allow_partial=True):
             logging.exception("Trade management inspection failed")
 
 
+def terminal_options(cfg):
+    options = {"path": cfg["terminal_path"]}
+    password = cfg.pop("password", None)
+    if cfg.get("hosting") == "self":
+        password = os.environ.get("MT5_PASSWORD") or password
+    if password:
+        options.update(login=int(cfg["login"]), server=cfg["server"], password=password)
+    return options
+
+
 def main():
+    from .runtime import load_env
+
+    load_env(os.environ.get("COPIER_ENV_FILE") or ".env")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    url = os.environ["COPIER_URL"].rstrip("/")
+    url = (os.environ.get("COPIER_URL") or os.environ.get("PUBLIC_URL") or "http://127.0.0.1:8000").rstrip("/")
+    token = os.environ.get("AGENT_TOKEN", "").strip()
+    terminal_path = os.environ.get("MT5_TERMINAL_PATH", "").strip()
+    if not token:
+        raise ValueError("Set AGENT_TOKEN in .env using the account's Worker setup token, or use python -m goldcopier.manage run for automatic provisioning")
+    if not terminal_path:
+        raise ValueError("Set MT5_TERMINAL_PATH in .env to your terminal64.exe")
     parsed = urlparse(url)
     if parsed.scheme != "https" and not (
         parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
     ):
         raise ValueError("HTTPS is required outside localhost")
-    statepath = os.environ.get("WORKER_STATE", "platform-worker.db")
+    statepath = os.environ.get("WORKER_STATE") or "platform-worker.db"
+    Path(statepath).parent.mkdir(parents=True, exist_ok=True)
     lock = Path(statepath + ".lock")
     fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     broker = None
@@ -365,7 +385,7 @@ def main():
         ledger.recover()
         with httpx.Client(
             base_url=url,
-            headers={"Authorization": "Bearer " + os.environ["AGENT_TOKEN"]},
+            headers={"Authorization": "Bearer " + token},
             timeout=10,
             follow_redirects=False,
         ) as client:
@@ -375,23 +395,21 @@ def main():
             if cfg["demo_workspace"]:
                 raise ValueError("Seeded demo workspaces cannot run broker workers")
             cfg.update(
-                terminal_path=os.environ["MT5_TERMINAL_PATH"],
-                filling_mode=int(os.environ.get("MT5_FILLING_MODE", "1")),
+                terminal_path=terminal_path,
+                filling_mode=int(os.environ.get("MT5_FILLING_MODE") or "1"),
                 allow_live=cfg["allow_live"]
                 and os.environ.get("ALLOW_LIVE_TRADING", "false") == "true",
                 baseline=ledger.baseline(),
             )
             import MetaTrader5 as mt
 
-            init = {"path": cfg["terminal_path"]}
-            if cfg.get("password"):
-                init.update(
-                    login=int(cfg["login"]),
-                    password=cfg.pop("password"),
-                    server=cfg["server"],
-                )
+            init = terminal_options(cfg)
             if not mt.initialize(**init):
-                raise ValueError("MT5 terminal connection failed")
+                raise ValueError(
+                    f"MT5 terminal connection failed: {mt.last_error()}. "
+                    "Check the MT5 login and server in the app and MT5_PASSWORD "
+                    "in .env (or the terminal's saved login), then restart the server."
+                )
             broker = PlatformBroker(cfg, mt)
             tick = 0
             while True:

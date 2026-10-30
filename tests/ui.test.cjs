@@ -7,14 +7,14 @@ const source=fs.readFileSync(path.join(__dirname,'../goldcopier/web/app.js'),'ut
 const html=fs.readFileSync(path.join(__dirname,'../docs/frontend-preview.html'),'utf8');
 const sample=JSON.parse(html.match(/if\(path==="\/demo"\) return ([\s\S]*?); if\(path==="\/dashboard"\)/)[1]);
 const tick=()=>new Promise(r=>setTimeout(r,25));
-async function setup(authenticated=false){
+async function setup(authenticated=false,configOverrides={},dashboardOverride=null){
  const calls=[];
  const dom=new JSDOM('<div id="app"></div><div id="toast"></div><dialog id="modal"></dialog>',{url:authenticated?'http://localhost/#overview':'http://localhost/#demo',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window;
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
  w.HTMLDialogElement.prototype.close=function(){this.open=false};
  w.HTMLElement.prototype.scrollIntoView=function(){};
- w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=sample.dashboard;else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
+ w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false,...configOverrides};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=dashboardOverride||sample.dashboard;else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
  w.eval(source);await tick();return {dom,w,calls};
 }
 
@@ -40,3 +40,46 @@ test('modal errors are dismissible within the active dialog',async()=>{const{dom
 test('logout clears session data and protected routes return to sign in',async()=>{const{dom,w,calls}=await setup(true);try{w.document.querySelector('.top-right [data-action="logout"]').click();await tick();assert.ok(w.document.querySelector('#login-form'));assert.equal(w.localStorage.getItem('gold-account'),null);assert.equal(calls.find(c=>c.url==='/api/auth/logout').opt.headers['X-CSRF-Token'],'csrf-test');w.location.hash='accounts';await tick();await tick();assert.equal(w.location.hash,'#login');assert.ok(!w.document.querySelector('.shell'))}finally{dom.window.close()}});
 
 test('expired sessions close dialogs and remove protected workspace content',async()=>{const{dom,w}=await setup(true);try{w.location.hash='accounts';await tick();w.document.querySelector('[data-action="connect"]').click();await tick();w.fetch=async()=>({ok:false,status:401,json:async()=>({detail:'Sign in to continue'})});w.document.querySelector('#connect-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();assert.equal(w.location.hash,'#login');assert.equal(w.document.querySelector('#modal').open,false);assert.equal(w.document.querySelector('#modal').textContent,'');assert.ok(w.document.querySelector('#login-form'));assert.ok(!w.document.querySelector('.shell'));assert.match(w.document.querySelector('#toast').textContent,/Sign in/)}finally{dom.window.close()}});
+
+
+test('local account page exposes copying instead of worker commands',async()=>{const{dom,w}=await setup(true,{demo:false,local_worker_available:true});try{w.location.hash='accounts';await tick();const card=w.document.querySelector('.account-card');assert.ok(card.querySelector('[data-action="toggle-copy"]'));assert.ok(!card.querySelector('[data-action="worker-setup"]'));w.document.querySelector('[data-action="connect"]').click();await tick();assert.ok(w.document.querySelector('#connect-analyst'));assert.match(w.document.querySelector('#hosting').textContent,/This computer/)}finally{dom.window.close()}});
+
+test('connect MT5, wait for readiness and start copying from the same account page',async()=>{
+ const dashboard=structuredClone(sample.dashboard);dashboard.accounts=[];
+ const{dom,w,calls}=await setup(true,{demo:false,local_worker_available:true},dashboard);
+ try{
+  const originalFetch=w.fetch;
+  w.fetch=async(url,opt={})=>{
+   if(url==='/api/accounts'&&opt.method==='POST'){
+    calls.push({url,opt});const body=JSON.parse(opt.body);
+    dashboard.accounts.push({...structuredClone(sample.dashboard.accounts[0]),id:'new-local',name:body.name,login:body.login,server:body.server,hosting:'self',enabled:false,online:false,heartbeat:null,snapshot:{},follows:[{analyst_id:body.analyst_id}]});
+    return {ok:true,status:200,json:async()=>({id:'new-local'})};
+   }
+   if(url==='/api/accounts/new-local/enabled'&&opt.method==='POST')dashboard.accounts[0].enabled=JSON.parse(opt.body).enabled;
+   return originalFetch(url,opt);
+  };
+  w.location.hash='accounts';await tick();w.document.querySelector('[data-action="connect"]').click();await tick();
+  const form=w.document.querySelector('#connect-form');form.elements.namedItem('name').value='My MT5';form.elements.namedItem('login').value='123456';form.elements.namedItem('server').value='Demo';form.elements.namedItem('consent').checked=true;
+  const analyst=form.elements.namedItem('analyst_id').value;
+  form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
+  assert.equal(w.document.querySelector('#modal').open,false);
+  assert.equal(w.location.hash,'#accounts');
+  assert.match(w.document.querySelector('.account-card').textContent,/Connecting to MT5/);
+  assert.equal(w.document.querySelector('[data-action="toggle-copy"]').disabled,true);
+  assert.equal(JSON.parse(calls.find(c=>c.url==='/api/accounts').opt.body).analyst_id,analyst);
+  assert.ok(!calls.some(c=>c.url.endsWith('/enabled')));
+  dashboard.accounts[0].online=true;dashboard.accounts[0].heartbeat=Date.now()/1000;
+  await w.eval('refresh()');
+  assert.match(w.document.querySelector('.account-card').textContent,/Ready/);
+  const copy=w.document.querySelector('[data-action="toggle-copy"]');assert.equal(copy.disabled,false);copy.click();await tick();
+  assert.equal(JSON.parse(calls.find(c=>c.url==='/api/accounts/new-local/enabled').opt.body).enabled,true);
+  assert.match(w.document.querySelector('.account-card').textContent,/Copying is on. Waiting for the next valid signal/);
+ }finally{dom.window.close()}
+});
+
+test('copy button targets its own card rather than another selected account',async()=>{
+ const dashboard=structuredClone(sample.dashboard);const first=dashboard.accounts[0];first.enabled=false;first.online=true;first.snapshot.error=null;
+ dashboard.accounts=[first,{...structuredClone(first),id:'second-account'}];
+ const{dom,w,calls}=await setup(true,{demo:false,local_worker_available:true},dashboard);
+ try{w.location.hash='accounts';await tick();w.document.querySelector('[data-action="toggle-copy"][data-account="second-account"]').click();await tick();assert.ok(calls.some(c=>c.url==='/api/accounts/second-account/enabled'));assert.ok(!calls.some(c=>c.url===`/api/accounts/${first.id}/enabled`))}finally{dom.window.close()}
+});

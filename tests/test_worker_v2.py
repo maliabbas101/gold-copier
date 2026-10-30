@@ -6,8 +6,24 @@ import pytest
 from test_mt5 import MT
 from goldcopier.broker_v2 import PlatformBroker, MAGIC
 from goldcopier.platform_models import Risk
-from goldcopier.platform_agent import Ledger, execute, monitor
+from goldcopier.platform_agent import Ledger, execute, monitor, terminal_options
 from goldcopier.signals_v2 import parse_signal
+
+
+def test_self_hosted_terminal_uses_explicit_env_password(monkeypatch):
+    monkeypatch.setenv("MT5_PASSWORD", "local-trading-password")
+    options = terminal_options({"terminal_path": "terminal.exe", "hosting": "self",
+                                "login": "123", "server": "Broker-Demo", "password": None})
+    assert options == {"path": "terminal.exe", "login": 123,
+                       "server": "Broker-Demo", "password": "local-trading-password"}
+
+
+def test_saved_terminal_login_and_managed_credentials_stay_separate(monkeypatch):
+    monkeypatch.delenv("MT5_PASSWORD", raising=False)
+    assert terminal_options({"terminal_path": "terminal.exe", "hosting": "self"}) == {"path": "terminal.exe"}
+    monkeypatch.setenv("MT5_PASSWORD", "local-password")
+    assert terminal_options({"terminal_path": "terminal.exe", "hosting": "managed",
+                             "login": "123", "server": "Demo", "password": "managed-password"})["password"] == "managed-password"
 
 
 class BrokerMT(MT):

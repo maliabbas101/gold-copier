@@ -119,7 +119,10 @@ def create_app():
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": "0.2.0"}
+        result = {"ok": True, "version": "0.2.0"}
+        if os.environ.get("LOCAL_RUNTIME_ID"):
+            result["runtime_id"] = os.environ["LOCAL_RUNTIME_ID"]
+        return result
 
     @app.get("/api/config")
     def config():
@@ -132,6 +135,9 @@ def create_app():
             ),
             "managed_available": bool(os.environ.get("SUPERVISOR_TOKEN")),
             "reset_available": bool(os.environ.get("SMTP_HOST")),
+            "local_worker_available": bool(
+                os.environ.get("LOCAL_RUNTIME_ID") and os.environ.get("MT5_TERMINAL_PATH")
+            ),
         }
 
     @app.get("/api/demo")
@@ -397,13 +403,15 @@ def create_app():
             raise ValueError("Live execution disabled")
         return {
             "account_id": a["id"],
+            "hosting": a["hosting"],
             "login": a["login"],
             "server": a["server"],
             "symbol": a["symbol"],
             "mode": a["mode"],
             "enabled": bool(a["enabled"]),
             "risk": json.loads(a["risk"]),
-            "password": vault.decrypt(a["secret"], a["id"]) if a["secret"] else None,
+            "password": vault.decrypt(a["secret"], a["id"])
+            if a["hosting"] == "managed" and a["secret"] else None,
             "allow_live": live,
             "demo_workspace": demo,
         }

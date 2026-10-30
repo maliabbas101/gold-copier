@@ -1,83 +1,130 @@
-# Gold Copier — community trading platform
+# Gold Copier
 
-A full-stack XAUUSD community copier with a responsive member dashboard, browser authentication, individual MT5 accounts, analyst feeds, risk controls, trade management, subscriptions, and a managed Windows terminal pool.
+Copy an authorized analyst's Discord gold signals to your MT5 account.
+**Fill `.env`, start the server, connect MT5 in the app, and click Start copying.**
+The server manages the Discord listener and MT5 worker for you.
 
-**This branch is `feature/community-platform`. `main` retains the original backend-only MVP.** The interface is an original implementation of the public feature set, not a copy of Inspired Analyst's private dashboard or source code.
+## 1. Install once
 
-## Where is the frontend?
-
-The frontend is in [`goldcopier/web/`](goldcopier/web/): HTML, CSS, and JavaScript served directly by FastAPI. There is no separate frontend build or Node runtime needed to run the application. Node is used only for frontend tests.
-
-- Open [`docs/frontend-preview.html`](docs/frontend-preview.html) after downloading it for a self-contained, read-only preview. Select **Explore live demo** on the landing page.
-- For the actual running app, start the local demo below and open **http://127.0.0.1:8000/#demo**.
-- Optional operator sign-in uses `demo@goldcopier.local`; the launcher stores its generated password in `.demo/access-password`. Demo data are explicitly labelled and **no broker jobs can be claimed in demo mode**.
-
-## Start the frontend and backend together
-
-Python 3.11 or 3.12:
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.lock.txt
-pip install -e . --no-deps
-python -m goldcopier.launch --demo
-```
-
-Open **http://127.0.0.1:8000/** for the landing page, **/#demo** for the read-only sample workspace, or **/#login** to sign in and edit demo settings. Demo initialization uses a separate `.demo` state directory. It does not connect to a broker, require broker credentials, or enable payments.
-
-## Included
-
-| Area | Implementation |
-| --- | --- |
-| Frontend | Landing page, signup/login/password reset, dashboard, account wizard, analysts, risk settings, trade controls/history, activity, billing, settings, operator console |
-| Account security | Scrypt password hashes; hashed opaque session/worker tokens; HttpOnly/SameSite cookies; CSRF and Origin checks; login throttling; AES-256-GCM encryption of stored MT5 passwords |
-| Account onboarding | Self-hosted or managed terminal assignment, explicit account-owner consent, worker verification, per-account token rotation and credential revocation |
-| Signals | XAUUSD market/limit/stop orders, exact entry or market entry ranges, single or multiple targets, BE, referenced close/cancel/partial/update commands, authorized Discord text edits |
-| Risk | Percentage, account-currency cash, or fixed-lot sizing; percentage/lot caps; daily equity loss stop; persisted high-water drawdown; aggregate exposure and concurrent-position limits; spread and entry filters |
-| Management | Actual-fill BE; durable partial-exit stages; TP1/TP2 and runners; manual SL/TP adjustment protection; pending cancellation/modification; broker position reconciliation by comment or order history |
-| Reliability | Atomic single claims, durable local submission journals, acknowledgement retry, uncertainty blocks, operator reconciliation without order replay, worker heartbeats and activity alerts |
-| Billing | Stripe Checkout, billing portal, signed/idempotent subscription webhooks, authoritative subscription retrieval, entitlement checks at intake/start/claim |
-| Managed execution | Dedicated Windows MT5 terminal pool, one worker per account, encrypted credential provisioning, persistent account-to-slot assignment |
-| Analyst sources | Authorized Discord feeds; optional read-only MT5 master-position bridge |
-| Deployment | Non-root Docker image, Compose, Caddy HTTPS example, database backups, supervised recovery instructions |
-
-## Verification
-
-```bash
-pytest -q
-npm ci --ignore-scripts
-npm test
-```
-
-Python tests cover account isolation, authentication/CSRF, vault binding, webhook signatures and entitlements, signal fanout, demo/live gates, broker guards, partial exits, manual stop preservation, duplicate prevention, interrupted submissions, and reconciliation. DOM tests exercise the real frontend source, navigation, account wizard, risk-form payloads, trade review, read-only demo controls, and HTML escaping. The preview embeds labelled sample data; it does not replace the authenticated API in the real application.
-
-**Actual MT5/Windows execution, Stripe test-mode checkout, SMTP delivery, Docker deployment, and browser visual/responsive QA still require environment-specific acceptance.** Automated broker tests use a fake MT5 API. Do not interpret passing tests as broker certification or a production uptime guarantee.
-
-## Deployment and operation
-
-See [`docs/PLATFORM.md`](docs/PLATFORM.md) for production setup, worker/pool configuration, billing, Discord grammar, risk semantics, and recovery. See [`docs/FEATURES.md`](docs/FEATURES.md) for the explicit feature comparison and remaining limits. The original v0.1 setup is preserved in [`docs/LEGACY_MVP.md`](docs/LEGACY_MVP.md); new installations should use the platform app rather than the legacy server.
-
-The service is not deployed by committing this branch. Live execution is disabled by default and requires **both** server and worker enablement, explicit account consent, broker demo acceptance, and operator-managed infrastructure. Only MT5 accounts are supported; MT4 and PrimeXBT PXTrader are separate integrations.
-
-## Windows account administration
-
-This application uses FastAPI and SQLite, so Django's `get_user_model()` and
-`manage.py shell` do not apply. Python statements pasted directly into PowerShell
-produce the `from keyword is not supported` error.
-
-To create an operator account, run this from the project directory in PowerShell:
+Use Windows with Python 3.11 or 3.12 and an installed MT5 terminal. Have your
+broker's **MT5 demo account** (hedging mode) number, server and trading password ready.
+Open PowerShell in this project folder:
 
 ```powershell
-.\venv\Scripts\python.exe -m goldcopier.manage create-admin --email you@example.com --name "Your Name"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[mt5]"
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-The command prompts for a password (at least 12 characters). Set `PLATFORM_DB` to
-the same database used by the running app before running it. Ordinary members can
-use **Create account** in the browser. After creating an operator, sign in through
-`/#login`; the app uses an HttpOnly session cookie and does not require a manually
-created browser token. Worker tokens are separate and only authenticate MT5 workers.
+## 2. Fill in `.env`
 
-For frontend tests in PowerShell, use `npm.cmd ci --ignore-scripts` and
-`npm.cmd test` if the execution policy blocks `npm.ps1`.
+Edit **`.env`**, not `.env.example`. The template labels each setting as **required**,
+**conditionally required**, **default**, or **optional**.
+
+| Variables | Do I need to fill them in? |
+| --- | --- |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | **First start only.** Creates your app login; password must be 12-128 characters. |
+| `DISCORD_BOT_TOKEN` | **Required for Discord signals.** Blank disables the listener. |
+| `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_ID`, `DISCORD_TRADER_ID` | **Required for a new analyst.** Set all three together. Optional if that source already exists in the app. |
+| `MT5_TERMINAL_PATH` | **Required for local MT5.** Use the actual executable path; blank disables the worker. |
+| `MT5_PASSWORD` | **Required unless MT5 already has a working saved login.** Use the trading password. |
+| `ANALYST_NAME` | **Optional.** You can keep the supplied display name. |
+
+Example:
+
+```dotenv
+ADMIN_EMAIL=you@example.com
+ADMIN_PASSWORD=choose-a-password-at-least-12-characters
+
+DISCORD_BOT_TOKEN=your-discord-bot-token
+DISCORD_GUILD_ID=your-discord-server-id
+DISCORD_CHANNEL_ID=your-signal-channel-id
+DISCORD_TRADER_ID=the-signal-authors-user-id
+ANALYST_NAME=My analyst
+
+MT5_TERMINAL_PATH="C:\Program Files\MetaTrader 5\terminal64.exe"
+MT5_PASSWORD=your-mt5-trading-password
+```
+
+The Discord bot must be in your server, able to read the signal channel, and have
+**Message Content Intent** enabled. `DISCORD_TRADER_ID` identifies the human or
+bot posting the signals. The initial analyst is created from these IDs automatically.
+
+`MT5_PASSWORD` is your **trading account password**, not your broker website
+password or an investor password. You can leave it blank if that terminal already
+has a working saved login. MT5 must allow algorithmic and external Python trading.
+
+**Leave the other defaults unchanged** for your first setup: `PUBLIC_URL`,
+`PLATFORM_DB`, `LOCAL_STATE_DIR`, `DEMO_MODE`, `ALLOW_LIVE_TRADING` and
+`BILLING_ENABLED`. `MT5_FILLING_MODE=1` uses IOC; change it only if your broker
+requires another supported filling mode.
+
+**Leave these optional values blank** for a new local setup: `VAULT_KEY`,
+`AGENT_TOKEN`, `COPIER_URL`, `WORKER_STATE` and `LOCAL_ACCOUNT_ID`. The runner
+handles the key, token, URL and journal automatically. Account selection only
+needs an explicit ID if multiple local accounts exist and no token selects one.
+Preserve the original vault key when using an existing encrypted database.
+
+The Stripe, SMTP, managed-pool and master-bridge settings at the bottom of
+`.env.example` are **optional features**, not requirements for local Discord copying.
+Existing installations can still supply their token and journal path; see the
+[advanced setup guide](docs/PLATFORM.md#one-command-local-windows-startup).
+
+## 3. Start the server
+
+```powershell
+.\.venv\Scripts\python.exe -m goldcopier.manage run
+```
+
+Leave this window open. There are no separate worker commands or setup prompts.
+Open **[http://127.0.0.1:8001](http://127.0.0.1:8001/#login)** and sign in with the
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`. These create your initial app
+account only; changing them later does not reset its password.
+
+## 4. Connect MT5 and start copying
+
+1. Open **Accounts** and click **Connect MT5**.
+2. Enter your MT5 account number, exact broker server and gold symbol (for example,
+   `XAUUSD` or `XAUUSDm`). Choose **Demo account** and **This computer (automatic)**.
+3. Select your analyst under **Copy signals from**, confirm account ownership, and
+   click **Connect MT5**.
+4. The account page updates automatically. Wait for **Ready**, review the risk
+   settings, then click **Start copying**.
+5. When the account shows **Copying**, wait for a new valid signal. Check
+   **Trades & orders** for its result and MT5 for the actual position.
+
+Starting copying does not immediately place a trade. It enables future valid
+signals from your selected analyst, subject to your risk settings and broker
+checks. Old Discord messages are not replayed. Supported signal examples are in
+[the signal guide](docs/PLATFORM.md).
+
+## Next time
+
+Run the same server command. Your account, analyst, tokens and settings are saved.
+Keep `.env` and `.local-runtime/` private and preserve them between starts.
+**Pause copying** stops new entries. **Ctrl+C** stops the server and its services;
+software-managed breakeven and partial exits need the server running.
+
+If the account shows **Connection problem**, check the server window for the MT5
+error, correct the account/server/password or trading permissions, and restart.
+Use a fresh PowerShell window if you previously set `$env:` values, because those
+override `.env`. One local terminal supports one account at a time.
+
+## Development and deployment
+
+- [Production, multiple terminals, troubleshooting and signal format](docs/PLATFORM.md)
+- [Feature coverage](docs/FEATURES.md)
+- [Read-only UI preview](docs/frontend-preview.html) (cannot execute trades)
+- Frontend source: [goldcopier/web/](goldcopier/web/); no Node build is needed to run it.
+
+Developer checks:
+
+```powershell
+python -m pytest -q
+npm.cmd ci --ignore-scripts
+npm.cmd test
+```
+
+Automated execution tests use a simulated MT5 API. Verify the complete Discord-to-MT5
+flow on a broker demo account before considering live use. Live trading is disabled
+by default.

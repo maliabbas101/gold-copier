@@ -25,6 +25,60 @@ python scripts/build_preview.py
 
 The result is `docs/frontend-preview.html`. It bundles the actual frontend with a read-only sample-data adapter and no credentials. It is a visual review artifact; server-backed editing requires running the actual app.
 
+## One-command local Windows startup
+
+Use `python -m goldcopier.manage run` for a local server, the Discord listener,
+and one self-hosted MT5 worker together. Copy `.env.example` to `.env` once and
+set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `MT5_TERMINAL_PATH` and `DISCORD_BOT_TOKEN`.
+Install `python -m pip install -e ".[mt5]"` first. The initial operator is created
+from `.env` without terminal prompts; existing accounts are never reset or promoted.
+Set `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_ID` and `DISCORD_TRADER_ID` to create the
+initial analyst automatically. `ANALYST_NAME` is its display name. Existing matching
+sources are reused without changing their paused/enabled state.
+The default example URL is **http://127.0.0.1:8001/#login**. The runner is limited
+to loopback HTTP; production hosting uses the deployment instructions below.
+
+Add the account in the app as **Self-hosted**, with the login and server matching
+the broker demo account you want to connect. `MT5_PASSWORD` can supply its trading
+password for automatic login; leave it blank to use the terminal's saved login. The runner discovers
+the account and provisions its token automatically. Choose the analyst in the
+connection form, wait for Ready, then click Start copying on the account card. With multiple self-hosted
+accounts, set `LOCAL_ACCOUNT_ID` to the desired ID shown on the account card before
+restarting. Each terminal can serve only one account. Additional simultaneous
+accounts need the existing managed terminal pool.
+
+To reuse a worker token you already generated, put it in `AGENT_TOKEN` in `.env`.
+The runner uses that token to select its self-hosted account and does not rotate
+it. `PLATFORM_DB` must be the database that issued the token. An invalid token or
+conflicting `LOCAL_ACCOUNT_ID` is rejected. Leave `AGENT_TOKEN` blank to keep
+automatic provisioning. Set `WORKER_STATE` to the existing journal when replacing
+an older worker command; blank uses the per-account journal. `COPIER_URL` can be
+blank to use `PUBLIC_URL`; if supplied for `manage run`, the two URLs must match.
+
+The runner loads literal `.env` values, preserving quoted Windows paths. Shell
+variables override file settings. Blank Discord/terminal settings disable those
+components. A custom file can be selected with `--env-file path`. Other management
+commands also load this file. Never paste secrets into command output or commit
+`.env` or `.local-runtime/`.
+
+When `VAULT_KEY` is blank, a new workspace gets a persistent key at
+`.local-runtime/vault-key`. Existing encrypted accounts require their original
+key; the runner refuses to replace an unavailable or incorrect key. Local worker
+tokens and submission journals are saved per account under `.local-runtime/workers/`.
+Restrict access to this directory to the operating user, preserve it between
+starts, and back up the key separately from the database. A valid saved token is
+reused on restart; issuing a replacement token pauses copying as usual.
+
+**Ctrl+C** stops the local worker, listener and web server. A failed worker pauses
+new entries and shows a connection error in the app, which stays available. Fix the
+error and restart the server command; workers are not automatically restarted.
+A failed web server or Discord listener stops the stack with an actionable error.
+After forced shutdown, verify old processes and broker state before removing any
+stale lock. Recently active workers are not taken over. A seeded preview database
+is rejected, even if `DEMO_MODE` is changed: use a separate workspace database.
+`DEMO_MODE=false` permits real terminal integration with an **MT5 demo account**;
+`ALLOW_LIVE_TRADING=false` continues to block live accounts.
+
 ## Production web service
 
 1. Copy `.env.example` to `.env`. Generate `VAULT_KEY` with `python -m goldcopier.manage key`. Keep it in your secret manager and back it up separately from the database.
@@ -44,18 +98,33 @@ The Docker image contains only the web/listener components; MT5 terminals run on
 
 ## Self-hosted Windows worker
 
-Install Python 3.11/3.12, the project, and `pip install '.[mt5]'`. Install a dedicated broker MT5 terminal. Use a hedging account and enable algorithmic/external Python trading. Set:
+Install Python 3.11/3.12, the project, and `pip install '.[mt5]'`. Install a dedicated broker MT5 terminal. Use a hedging account and enable algorithmic/external Python trading. Save the worker settings in `.env` in the project directory:
+
+```dotenv
+COPIER_URL=http://127.0.0.1:8000
+AGENT_TOKEN=replace-with-your-account-worker-token
+MT5_TERMINAL_PATH="C:\GoldCopier\Terminal-01\terminal64.exe"
+MT5_FILLING_MODE=1
+WORKER_STATE=platform-worker.db
+ALLOW_LIVE_TRADING=false
+```
+
+Set `COPIER_URL` to the actual running API address (HTTPS outside localhost).
+The standalone worker reads `.env` automatically, so no PowerShell `$env:...`
+assignments are needed. Start it with:
 
 ```powershell
-$env:COPIER_URL = 'https://your-domain'
-$env:AGENT_TOKEN = '<account-specific worker token>'
-$env:MT5_TERMINAL_PATH = 'C:\GoldCopier\Terminal-01\terminal64.exe'
-$env:MT5_FILLING_MODE = '1'
-$env:WORKER_STATE = 'platform-worker.db'
 python -m goldcopier.platform_agent
 ```
 
-For self hosting, log into the terminal yourself. A managed worker receives the encrypted stored password through its authenticated configuration endpoint and initializes the terminal with it. The worker verifies login, server, account mode, hedging mode, trading permissions, and fresh quotes. It does not accept whatever account happens to be logged into a terminal.
+Use `python -m goldcopier.manage run` instead when you want the server, Discord
+listener and local worker started together. Do not run both commands for the same
+account. Existing shell variables override `.env`; use a fresh shell when replacing
+old PowerShell assignments. The standalone worker requires `AGENT_TOKEN`;
+automatic token provisioning is provided only by `manage run`.
+
+For self hosting, set `MT5_PASSWORD` to log in automatically with the account login
+and server registered in the app, or leave it blank and use a saved terminal login. A managed worker receives the decrypted trading password over its authenticated configuration endpoint and initializes the terminal with it. The worker verifies login, server, account mode, hedging mode, trading permissions, and fresh quotes. It does not accept whatever account happens to be logged into a terminal.
 
 Filling mode must match your broker: 0 FOK, 1 IOC, 2 RETURN. Pending entries use RETURN and broker-expiring orders with a default one-hour TTL. Broker support for time-specified pending orders must be checked; unsupported instructions fail preflight. Market signal TTL defaults to 60 seconds. A missed entry is not automatically chased or requeued.
 

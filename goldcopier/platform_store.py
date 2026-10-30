@@ -141,11 +141,18 @@ class PlatformStore:
 
     def add_account(self, user, data, vault):
         account_id = uid()
+        analyst_id = data.pop("analyst_id", None)
         password = data.pop("password")
+        if data["hosting"] == "self":
+            password = ""
         if data["hosting"] == "managed" and not password:
             raise ValueError("Managed hosting requires the MT5 trading password")
         secret = vault.encrypt(password, account_id) if password else None
         with self.db() as db:
+            if analyst_id and not db.execute(
+                "SELECT 1 FROM analysts WHERE id=? AND active=1", (analyst_id,)
+            ).fetchone():
+                raise ValueError("Choose an active analyst to copy")
             db.execute(
                 "INSERT INTO accounts(id,user_id,name,broker,login,server,symbol,mode,hosting,secret,risk,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -163,6 +170,8 @@ class PlatformStore:
                     time.time(),
                 ),
             )
+            if analyst_id:
+                db.execute("INSERT INTO follows(account_id,analyst_id) VALUES(?,?)", (account_id, analyst_id))
             self.event(
                 db,
                 user,

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import socket
@@ -17,7 +18,7 @@ import httpx
 from pydantic import ValidationError
 
 from .auth import Vault
-from .platform_models import Analyst, Signup
+from .platform_models import AccountInput, Analyst, Signup
 from .platform_store import PlatformStore
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,75 @@ def load_env(path=".env", environ=None):
         environ.setdefault(key, value)
 
 
+def process_alive(pid):
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def clear_stale_lock(path):
+    """Remove a lock whose recorded process has exited; keep any other lock."""
+    try:
+        pid = int(Path(path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if pid == os.getpid() or process_alive(pid):
+        return False
+    Path(path).unlink(missing_ok=True)
+    log.info("Removed stale lock from stopped process %s: %s", pid, path)
+    return True
+
+
+def bind_children_to_runner():
+    """Windows: services share a kill-on-close job with the runner, so they can
+    never outlive it, however the runner ends (closed window, repeated Ctrl+C)."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_ulonglong * 6),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    job = kernel32.CreateJobObjectW(None, None)
+    info = Extended()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not (job and kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+            and kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())):
+        log.warning("Could not tie services to this window; if it is closed, stop leftover python processes manually.")
+        return None
+    return job  # The handle must stay open for the runner's lifetime.
+
+
 def private_file(path, value):
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -85,7 +155,7 @@ def configure():
             probe.bind(("127.0.0.1", port))
         except OSError as exc:
             raise ValueError(f"Port {port} is already in use. Stop that server or change PUBLIC_URL.") from exc
-    terminal = os.environ.get("MT5_TERMINAL_PATH", "").strip()
+    terminal = find_terminal()
     if terminal:
         if sys.platform != "win32":
             raise ValueError("The local MT5 worker requires Windows")
@@ -122,17 +192,33 @@ def configure():
     return store, state, base, port, terminal
 
 
-def bootstrap_admin(store):
+def find_terminal():
+    """MT5_TERMINAL_PATH, else the only terminal64.exe under Program Files."""
+    terminal = os.environ.get("MT5_TERMINAL_PATH", "").strip()
+    if terminal or sys.platform != "win32":
+        return terminal
+    roots = {os.environ.get(name) for name in ("PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)")}
+    found = sorted({str(p) for root in roots if root for p in Path(root).glob("*/terminal64.exe")})
+    if len(found) > 1:
+        raise ValueError("Several MT5 terminals found. Set MT5_TERMINAL_PATH in .env to one of: " + "; ".join(found))
+    if found:
+        log.info("Using MT5 terminal %s", found[0])
+    return found[0] if found else ""
+
+
+def bootstrap_admin(store, state):
     with store.db() as db:
         if db.execute("SELECT 1 FROM users WHERE role='admin'").fetchone():
             return
-    if not os.environ.get("ADMIN_EMAIL") or not os.environ.get("ADMIN_PASSWORD"):
-        raise ValueError("First start: set ADMIN_EMAIL and ADMIN_PASSWORD (at least 12 characters) in .env")
+    email = os.environ.get("ADMIN_EMAIL", "").strip() or "admin@goldcopier.local"
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    passfile = state / "admin-password"
+    if not password:
+        if not passfile.exists():
+            private_file(passfile, secrets.token_urlsafe(18))
+        password = passfile.read_text(encoding="utf-8").strip()
     try:
-        body = Signup(
-            name=os.environ.get("ADMIN_NAME") or "Local operator",
-            email=os.environ["ADMIN_EMAIL"].strip(), password=os.environ["ADMIN_PASSWORD"],
-        )
+        body = Signup(name=os.environ.get("ADMIN_NAME") or "Local operator", email=email, password=password)
     except ValidationError as exc:
         # ValidationError's default string includes submitted values/passwords.
         fields = ", ".join(str(e["loc"][0]) for e in exc.errors())
@@ -141,7 +227,25 @@ def bootstrap_admin(store):
         if db.execute("SELECT 1 FROM users WHERE email=?", (body.email.lower().strip(),)).fetchone():
             raise ValueError("That email already exists. Create an operator using manage create-admin with a different email.")
     store.signup(body.name, body.email, body.password, "admin")
-    log.info("Operator account created. Sign in using ADMIN_EMAIL and ADMIN_PASSWORD from .env.")
+    where = "ADMIN_PASSWORD from .env" if os.environ.get("ADMIN_PASSWORD") else f"the password saved in {passfile}"
+    log.info("Operator account created. Sign in as %s with %s.", body.email, where)
+
+
+def discord_guild(channel_id):
+    """Resolve a channel's server ID with the bot token, so .env needs no guild ID."""
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        raise ValueError("Set DISCORD_BOT_TOKEN (or DISCORD_GUILD_ID) so the signal channel's server can be found")
+    try:
+        response = httpx.get(f"https://discord.com/api/v10/channels/{channel_id}",
+                             headers={"Authorization": "Bot " + token}, timeout=10)
+    except httpx.HTTPError as exc:
+        raise ValueError("Could not reach Discord to look up DISCORD_CHANNEL_ID; check your connection or set DISCORD_GUILD_ID") from exc
+    if response.status_code == 401:
+        raise ValueError("Discord rejected DISCORD_BOT_TOKEN")
+    if response.status_code != 200 or not response.json().get("guild_id"):
+        raise ValueError("The bot cannot see DISCORD_CHANNEL_ID. Invite the bot to that server and give it access to the channel.")
+    return str(response.json()["guild_id"])
 
 
 def bootstrap_analyst(store):
@@ -149,20 +253,94 @@ def bootstrap_analyst(store):
               for key in ("guild_id", "channel_id", "trader_id")}
     if not any(fields.values()):
         return
-    try:
-        analyst = Analyst(name=os.environ.get("ANALYST_NAME") or "My signal feed", **fields)
-    except ValidationError:
-        raise ValueError("Set all three numeric Discord IDs in .env: DISCORD_GUILD_ID, DISCORD_CHANNEL_ID and DISCORD_TRADER_ID") from None
+    if not (fields["channel_id"].isdigit() and fields["trader_id"].isdigit()):
+        raise ValueError("Set numeric DISCORD_CHANNEL_ID and DISCORD_TRADER_ID in .env")
+    query = "SELECT id FROM analysts WHERE channel_id=? AND trader_id=?"
+    params = [fields["channel_id"], fields["trader_id"]]
+    if fields["guild_id"]:
+        query, params = query + " AND guild_id=?", params + [fields["guild_id"]]
     with store.db() as db:
-        existing = db.execute(
-            "SELECT id FROM analysts WHERE guild_id=? AND channel_id=? AND trader_id=?",
-            (analyst.guild_id, analyst.channel_id, analyst.trader_id),
-        ).fetchall()
+        existing = db.execute(query, params).fetchall()
     if len(existing) > 1:
         raise ValueError("Duplicate analyst sources exist. Keep one configured analyst for these Discord IDs.")
     if existing:
         return existing[0]["id"]
+    fields["guild_id"] = fields["guild_id"] or discord_guild(fields["channel_id"])
+    try:
+        analyst = Analyst(name=os.environ.get("ANALYST_NAME") or "My signal feed", **fields)
+    except ValidationError:
+        raise ValueError("Discord IDs in .env must be numeric") from None
     return store.add_analyst(analyst.model_dump())
+
+
+def read_terminal(terminal):
+    """Login, server, mode and gold symbol of the account open in the MT5 terminal."""
+    import MetaTrader5 as mt
+
+    options = {"path": terminal}
+    login, server = os.environ.get("MT5_LOGIN", "").strip(), os.environ.get("MT5_SERVER", "").strip()
+    password = os.environ.get("MT5_PASSWORD", "")
+    if login and server and password:
+        if not login.isdigit():
+            raise ValueError("MT5_LOGIN must be your numeric MT5 account number")
+        options.update(login=int(login), server=server, password=password)
+    hint = ("Log in to your demo account in MetaTrader 5 once (File > Login to Trade Account, tick "
+            "Save password), or set MT5_LOGIN, MT5_SERVER and MT5_PASSWORD in .env.")
+    if not mt.initialize(**options):
+        raise ValueError(f"MT5 terminal connection failed: {mt.last_error()}. {hint}")
+    try:
+        info = mt.account_info()
+        if info is None or not info.login:
+            raise ValueError("MT5 is not logged in to a trading account. " + hint)
+        names = [s.name for s in mt.symbols_get("XAUUSD*") or ()]
+        demo = info.trade_mode == mt.ACCOUNT_TRADE_MODE_DEMO
+    finally:
+        mt.shutdown()
+    symbol = os.environ.get("MT5_SYMBOL", "").strip()
+    if not symbol:
+        gold = sorted((n for n in names if re.fullmatch(r"XAUUSD[A-Za-z0-9._-]{0,12}", n)), key=len)
+        if not gold:
+            raise ValueError("No XAUUSD symbol found in MT5. Set MT5_SYMBOL in .env to your broker's gold symbol.")
+        symbol = gold[0]
+    return {"login": str(info.login), "server": info.server, "symbol": symbol,
+            "mode": "demo" if demo else "live"}
+
+
+def bootstrap_account(store, terminal, analyst_id=None):
+    """Register the terminal's account on first start so the worker token can be
+    provisioned before anyone signs in. An existing self-hosted account is only made
+    to follow the .env analyst, e.g. after DISCORD_TRADER_ID changes."""
+    if not terminal:
+        return
+    with store.db() as db:
+        existing = db.execute("SELECT id,user_id FROM accounts WHERE hosting='self'").fetchall()
+    if existing:
+        if analyst_id and len(existing) == 1:
+            with store.db() as db:
+                followed = db.execute("SELECT 1 FROM follows WHERE account_id=? AND analyst_id=?",
+                                      (existing[0]["id"], analyst_id)).fetchone()
+            if not followed:
+                store.follow(existing[0]["user_id"], existing[0]["id"], analyst_id, True)
+                log.info("MT5 account now follows the analyst from .env. Unfollow old analysts in the app if needed.")
+        return
+    with store.db() as db:
+        owner = db.execute("SELECT id FROM users WHERE role='admin' ORDER BY created LIMIT 1").fetchone()[0]
+        if not analyst_id:
+            rows = db.execute("SELECT id FROM analysts WHERE active=1").fetchall()
+            analyst_id = rows[0]["id"] if len(rows) == 1 else None
+    found = read_terminal(terminal)
+    if found["mode"] == "live" and os.environ.get("ALLOW_LIVE_TRADING", "false") != "true":
+        raise ValueError("MT5 is logged in to a LIVE account. Log in to a demo account; live copying is disabled.")
+    server = found["server"].lower()
+    broker = "Exness" if "exness" in server else "PrimeXBT" if "primexbt" in server else "Other MT5"
+    try:
+        body = AccountInput(name="Local MT5", broker=broker, hosting="self", consent=True,
+                            analyst_id=analyst_id, **found)
+    except ValidationError:
+        raise ValueError(f"MT5 account details are not supported (server {found['server']!r}, symbol {found['symbol']!r})") from None
+    data = body.model_dump(exclude={"consent"})
+    store.add_account(owner, data, Vault(os.environ["VAULT_KEY"]))
+    log.info("Registered MT5 %s account %s on %s (%s).", found["mode"], found["login"], found["server"], found["symbol"])
 
 
 def start_child(module, *args, env=None):
@@ -271,7 +449,7 @@ class LocalWorker:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         ledger = Path(os.environ.get("WORKER_STATE") or directory / "worker.db").resolve()
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        if Path(str(ledger) + ".lock").exists():
+        if Path(str(ledger) + ".lock").exists() and not clear_stale_lock(str(ledger) + ".lock"):
             raise ValueError("Worker lock exists. Verify the old worker is stopped before removing its lock: " + str(ledger) + ".lock")
         tokenfile = directory / "agent-token"
         token = supplied_token or (tokenfile.read_text(encoding="utf-8") if tokenfile.exists() else "")
@@ -298,16 +476,19 @@ def main(env_file=".env"):
     os.environ["COPIER_ENV_FILE"] = str(Path(env_file).resolve())
     store, state, base, port, terminal = configure()
     lock = state / "runtime.lock"
+    if lock.exists():
+        clear_stale_lock(lock)
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError as exc:
         raise ValueError(f"Runner lock exists: {lock}. Verify the old runner is stopped before removing it.") from exc
     children = []
     worker = LocalWorker(store, state, terminal) if terminal else None
+    job = bind_children_to_runner()  # noqa: F841 - kept open until exit
     try:
         os.write(fd, str(os.getpid()).encode())
-        bootstrap_admin(store)
-        bootstrap_analyst(store)
+        bootstrap_admin(store, state)
+        bootstrap_account(store, terminal, bootstrap_analyst(store))
         server = start_child("uvicorn", "goldcopier.platform:create_app", "--factory",
                              "--host", "127.0.0.1", "--port", str(port))
         children.append(server)
@@ -318,7 +499,7 @@ def main(env_file=".env"):
         else:
             log.info("DISCORD_BOT_TOKEN is empty; Discord listener is disabled.")
         if not worker:
-            log.info("MT5_TERMINAL_PATH is empty; local worker is disabled.")
+            log.info("No MT5 terminal found; local worker is disabled. Set MT5_TERMINAL_PATH in .env.")
         while True:
             for child in children:
                 if child.poll() is not None:
@@ -327,8 +508,10 @@ def main(env_file=".env"):
                 worker.tick()
             time.sleep(2)
     except KeyboardInterrupt:
-        log.info("Stopping services...")
+        log.info("Stopping services, please wait (up to 20 seconds)...")
     finally:
+        # A second Ctrl+C must not abort cleanup and orphan the services.
+        interrupt = signal.signal(signal.SIGINT, signal.SIG_IGN)
         # Stop execution/intake before the API, preserving worker cleanup.
         stopped = True
         if worker and worker.child:
@@ -340,3 +523,4 @@ def main(env_file=".env"):
             lock.unlink(missing_ok=True)
         else:
             log.error("Runner lock retained because a service may still be running.")
+        signal.signal(signal.SIGINT, interrupt)

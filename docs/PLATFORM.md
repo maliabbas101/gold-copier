@@ -28,24 +28,32 @@ The result is `docs/frontend-preview.html`. It bundles the actual frontend with 
 ## One-command local Windows startup
 
 Use `python -m goldcopier.manage run` for a local server, the Discord listener,
-and one self-hosted MT5 worker together. Copy `.env.example` to `.env` once and
-set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `MT5_TERMINAL_PATH` and `DISCORD_BOT_TOKEN`.
-Install `python -m pip install -e ".[mt5]"` first. The initial operator is created
-from `.env` without terminal prompts; existing accounts are never reset or promoted.
-Set `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_ID` and `DISCORD_TRADER_ID` to create the
-initial analyst automatically. `ANALYST_NAME` is its display name. Existing matching
-sources are reused without changing their paused/enabled state.
-The default example URL is **http://127.0.0.1:8001/#login**. The runner is limited
-to loopback HTTP; production hosting uses the deployment instructions below.
+and one self-hosted MT5 worker together. Install `python -m pip install -e ".[mt5]"`
+first, copy `.env.example` to `.env` and set `DISCORD_BOT_TOKEN`,
+`DISCORD_CHANNEL_ID` and `DISCORD_TRADER_ID`. Everything else is automatic on
+first start:
 
-Add the account in the app as **Self-hosted**, with the login and server matching
-the broker demo account you want to connect. `MT5_PASSWORD` can supply its trading
-password for automatic login; leave it blank to use the terminal's saved login. The runner discovers
-the account and provisions its token automatically. Choose the analyst in the
-connection form, wait for Ready, then click Start copying on the account card. With multiple self-hosted
-accounts, set `LOCAL_ACCOUNT_ID` to the desired ID shown on the account card before
-restarting. Each terminal can serve only one account. Additional simultaneous
-accounts need the existing managed terminal pool.
+- **Operator login:** `ADMIN_EMAIL`/`ADMIN_PASSWORD`, or `admin@goldcopier.local`
+  with a generated password saved in `.local-runtime/admin-password`. Existing
+  operators are never reset or promoted.
+- **Analyst:** created from the Discord IDs. `DISCORD_GUILD_ID` is looked up from
+  the channel with the bot token when blank. Existing matching sources are reused
+  without changing their paused/enabled state.
+- **Terminal:** `MT5_TERMINAL_PATH`, or the only `terminal64.exe` under Program Files.
+- **MT5 account:** when no self-hosted account exists, the runner reads login,
+  server, demo/live mode and the gold symbol from the terminal, registers the
+  account for the operator and follows the analyst. The terminal must be logged in
+  with a saved password, or `MT5_LOGIN`, `MT5_SERVER` and `MT5_PASSWORD` must be
+  set. `MT5_SYMBOL` overrides the detected symbol. A live account is refused
+  unless `ALLOW_LIVE_TRADING=true`.
+- **Worker token:** provisioned for that account before anyone signs in.
+
+Open **http://127.0.0.1:8001/#login**, wait for Ready, review risk settings and
+click **Start copying**; copying never starts by itself. The runner is limited to
+loopback HTTP; production hosting uses the deployment instructions below. With
+multiple self-hosted accounts, set `LOCAL_ACCOUNT_ID` to the desired ID shown on
+the account card before restarting. Each terminal can serve only one account.
+Additional simultaneous accounts need the existing managed terminal pool.
 
 To reuse a worker token you already generated, put it in `AGENT_TOKEN` in `.env`.
 The runner uses that token to select its self-hosted account and does not rotate
@@ -120,8 +128,11 @@ python -m goldcopier.platform_agent
 Use `python -m goldcopier.manage run` instead when you want the server, Discord
 listener and local worker started together. Do not run both commands for the same
 account. Existing shell variables override `.env`; use a fresh shell when replacing
-old PowerShell assignments. The standalone worker requires `AGENT_TOKEN`;
-automatic token provisioning is provided only by `manage run`.
+old PowerShell assignments. The standalone worker requires `AGENT_TOKEN`. On the
+machine holding the database, `python -m goldcopier.manage worker-token` issues one
+without the server running (`--account ID` selects among several self-hosted
+accounts); issuing a token pauses copying until you click Start copying again.
+`MT5_TERMINAL_PATH` can be blank when only one terminal is installed.
 
 For self hosting, set `MT5_PASSWORD` to log in automatically with the account login
 and server registered in the app, or leave it blank and use a saved terminal login. A managed worker receives the decrypted trading password over its authenticated configuration endpoint and initializes the terminal with it. The worker verifies login, server, account mode, hedging mode, trading permissions, and fresh quotes. It does not accept whatever account happens to be logged into a terminal.

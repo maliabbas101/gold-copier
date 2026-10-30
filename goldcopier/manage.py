@@ -180,8 +180,10 @@ def seed_demo(store, password):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=["run", "key", "create-admin", "seed-demo", "backup"]
+        "command",
+        choices=["run", "key", "create-admin", "seed-demo", "backup", "worker-token"],
     )
+    parser.add_argument("--account", help="account ID for worker-token")
     parser.add_argument("--email")
     parser.add_argument("--name", default="Community Operator")
     parser.add_argument("--output")
@@ -201,7 +203,30 @@ def main():
     if args.command == "key":
         print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
         return
-    store = PlatformStore(os.environ.get("PLATFORM_DB", "platform.db"))
+    state = Path(os.environ.get("LOCAL_STATE_DIR") or ".local-runtime")
+    store = PlatformStore(os.environ.get("PLATFORM_DB") or state / "platform.db")
+    if args.command == "worker-token":
+        # Offline provisioning for a standalone platform_agent; no server needed.
+        with store.db() as db:
+            rows = db.execute(
+                "SELECT id,user_id,login,server FROM accounts WHERE hosting='self'"
+            ).fetchall()
+        rows = [r for r in rows if not args.account or r["id"] == args.account]
+        if not rows:
+            parser.exit(1, "No self-hosted account found. Start manage run once first.\n")
+        if len(rows) > 1:
+            parser.exit(
+                1,
+                "Several self-hosted accounts; choose one with --account: "
+                + ", ".join(r["id"] for r in rows)
+                + "\n",
+            )
+        row = rows[0]
+        token = store.rotate_agent(row["user_id"], row["id"])
+        print(f"Worker token for MT5 {row['login']} on {row['server']} (copying paused).")
+        print("Put this line in the worker's .env:")
+        print("AGENT_TOKEN=" + token)
+        return
     if args.command == "backup":
         if not args.output:
             raise ValueError("--output is required")

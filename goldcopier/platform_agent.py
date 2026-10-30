@@ -356,7 +356,7 @@ def terminal_options(cfg):
 
 
 def main():
-    from .runtime import load_env
+    from .runtime import find_terminal, load_env
 
     load_env(os.environ.get("COPIER_ENV_FILE") or ".env")
     logging.basicConfig(
@@ -364,9 +364,9 @@ def main():
     )
     url = (os.environ.get("COPIER_URL") or os.environ.get("PUBLIC_URL") or "http://127.0.0.1:8000").rstrip("/")
     token = os.environ.get("AGENT_TOKEN", "").strip()
-    terminal_path = os.environ.get("MT5_TERMINAL_PATH", "").strip()
+    terminal_path = find_terminal()
     if not token:
-        raise ValueError("Set AGENT_TOKEN in .env using the account's Worker setup token, or use python -m goldcopier.manage run for automatic provisioning")
+        raise ValueError("Set AGENT_TOKEN in .env. Create one without the server using python -m goldcopier.manage worker-token, or use python -m goldcopier.manage run for automatic provisioning")
     if not terminal_path:
         raise ValueError("Set MT5_TERMINAL_PATH in .env to your terminal64.exe")
     parsed = urlparse(url)

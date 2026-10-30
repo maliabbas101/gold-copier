@@ -22,8 +22,12 @@ def settings(tmp_path, monkeypatch):
         "BILLING_ENABLED", "AGENT_TOKEN", "WORKER_STATE", "COPIER_ENV_FILE",
         "ADMIN_EMAIL", "ADMIN_PASSWORD", "ADMIN_NAME", "MT5_PASSWORD",
         "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID", "DISCORD_TRADER_ID", "ANALYST_NAME",
+        "MT5_LOGIN", "MT5_SERVER", "MT5_SYMBOL",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Terminal auto-detection must never find an MT5 installed on the test machine.
+    for name in ("PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)"):
+        monkeypatch.setenv(name, str(tmp_path / "programs"))
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -288,6 +292,7 @@ def test_runner_failure_stops_every_started_service(settings, monkeypatch):
     monkeypatch.setattr(runtime, "start_child", lambda *a, **kw: next(children))
     monkeypatch.setattr(runtime, "wait_for_server", lambda *a: None)
     monkeypatch.setattr(runtime, "stop_child", lambda child: stopped.append(child) or True)
+    monkeypatch.setattr(runtime, "bind_children_to_runner", lambda: None)
     with pytest.raises(ValueError, match="service stopped unexpectedly"):
         runtime.main()
     assert stopped == [listener, server]
@@ -295,31 +300,191 @@ def test_runner_failure_stops_every_started_service(settings, monkeypatch):
 
 
 def test_bootstrap_creates_operator_only_once(settings, monkeypatch):
-    store, *_ = runtime.configure()
+    store, state, *_ = runtime.configure()
     monkeypatch.setenv("ADMIN_EMAIL", "owner@example.com")
     monkeypatch.setenv("ADMIN_PASSWORD", "long-test-password")
     monkeypatch.setattr("builtins.input", lambda _: pytest.fail("must not prompt"))
-    runtime.bootstrap_admin(store)
+    runtime.bootstrap_admin(store, state)
     monkeypatch.setenv("ADMIN_PASSWORD", "different-long-password")
-    runtime.bootstrap_admin(store)
+    runtime.bootstrap_admin(store, state)
     assert store.login("owner@example.com", "long-test-password")[2]["role"] == "admin"
     with store.db() as db:
         assert db.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0] == 1
 
 
 def test_bootstrap_validation_does_not_expose_password(settings, monkeypatch):
-    store, *_ = runtime.configure()
+    store, state, *_ = runtime.configure()
     monkeypatch.setenv("ADMIN_EMAIL", "owner@example.com")
     monkeypatch.setenv("ADMIN_PASSWORD", "secret")
     with pytest.raises(ValueError) as error:
-        runtime.bootstrap_admin(store)
+        runtime.bootstrap_admin(store, state)
     assert "secret" not in str(error.value)
 
 
-def test_bootstrap_missing_credentials_has_actionable_error(settings):
+def test_blank_admin_settings_generate_a_saved_login(settings):
+    store, state, *_ = runtime.configure()
+    runtime.bootstrap_admin(store, state)
+    password = (state / "admin-password").read_text()
+    assert len(password) >= 12
+    assert store.login("admin@goldcopier.local", password)[2]["role"] == "admin"
+
+
+def test_terminal_is_found_without_a_configured_path(settings, monkeypatch):
+    monkeypatch.setattr(runtime.sys, "platform", "win32")
+    assert runtime.find_terminal() == ""
+    folder = settings / "programs" / "MetaTrader 5"
+    folder.mkdir(parents=True)
+    (folder / "terminal64.exe").touch()
+    assert runtime.find_terminal() == str(folder / "terminal64.exe")
+    other = settings / "programs" / "Broker MT5"
+    other.mkdir()
+    (other / "terminal64.exe").touch()
+    with pytest.raises(ValueError, match="Several MT5 terminals"):
+        runtime.find_terminal()
+    monkeypatch.setenv("MT5_TERMINAL_PATH", "chosen.exe")
+    assert runtime.find_terminal() == "chosen.exe"
+
+
+def test_guild_is_looked_up_from_the_channel_once(settings, monkeypatch):
     store, *_ = runtime.configure()
-    with pytest.raises(ValueError, match="ADMIN_EMAIL and ADMIN_PASSWORD"):
-        runtime.bootstrap_admin(store)
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("DISCORD_CHANNEL_ID", "200")
+    monkeypatch.setenv("DISCORD_TRADER_ID", "300")
+    calls = []
+
+    def get(url, headers, timeout):
+        calls.append((url, headers))
+        return Obj(status_code=200, json=lambda: {"id": "200", "guild_id": "100"})
+
+    monkeypatch.setattr(runtime.httpx, "get", get)
+    ident = runtime.bootstrap_analyst(store)
+    assert calls == [("https://discord.com/api/v10/channels/200", {"Authorization": "Bot bot-token"})]
+    with store.db() as db:
+        assert db.execute("SELECT guild_id FROM analysts WHERE id=?", (ident,)).fetchone()[0] == "100"
+    monkeypatch.setattr(runtime.httpx, "get", lambda *a, **kw: pytest.fail("already known"))
+    assert runtime.bootstrap_analyst(store) == ident
+
+
+def test_guild_lookup_failure_is_actionable(settings, monkeypatch):
+    store, *_ = runtime.configure()
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("DISCORD_CHANNEL_ID", "200")
+    monkeypatch.setenv("DISCORD_TRADER_ID", "300")
+    monkeypatch.setattr(runtime.httpx, "get", lambda *a, **kw: Obj(status_code=403, json=lambda: {}))
+    with pytest.raises(ValueError, match="Invite the bot"):
+        runtime.bootstrap_analyst(store)
+
+
+class FakeMT5:
+    ACCOUNT_TRADE_MODE_DEMO = 0
+
+    def __init__(self, trade_mode=0, symbols=("XAUUSDm", "XAUUSDm.pro"), logged_in=True):
+        self.trade_mode, self.names, self.logged_in = trade_mode, symbols, logged_in
+        self.calls = []
+
+    def initialize(self, **options):
+        self.calls.append(options)
+        return True
+
+    def account_info(self):
+        if self.logged_in:
+            return Obj(login=81234567, server="Exness-MT5Trial7", trade_mode=self.trade_mode)
+
+    def symbols_get(self, group):
+        return [Obj(name=n) for n in self.names]
+
+    def last_error(self):
+        return (-1, "fail")
+
+    def shutdown(self):
+        self.calls.append("shutdown")
+
+
+@pytest.fixture
+def mt5(monkeypatch):
+    fake = FakeMT5()
+    monkeypatch.setitem(__import__("sys").modules, "MetaTrader5", fake)
+    return fake
+
+
+def test_first_start_registers_terminal_account_and_provisions_worker(settings, monkeypatch, mt5):
+    # The former deadlock: the worker token needed an account created in the running app.
+    store, state, *_ = runtime.configure()
+    runtime.bootstrap_admin(store, state)
+    analyst = store.add_analyst({"name": "Feed", "description": "", "guild_id": "1", "channel_id": "2",
+                                 "trader_id": "3", "active": True})
+    runtime.bootstrap_account(store, "terminal.exe")
+    assert mt5.calls == [{"path": "terminal.exe"}, "shutdown"]
+    with store.db() as db:
+        row = dict(db.execute("SELECT * FROM accounts").fetchone())
+        follows = db.execute("SELECT analyst_id FROM follows WHERE account_id=?", (row["id"],)).fetchall()
+    assert (row["login"], row["server"], row["symbol"], row["mode"], row["broker"], row["hosting"]) == (
+        "81234567", "Exness-MT5Trial7", "XAUUSDm", "demo", "Exness", "self")
+    assert [f[0] for f in follows] == [analyst]
+    calls = []
+    monkeypatch.setattr(runtime, "start_child", lambda module, **kw: calls.append(kw) or Obj(poll=lambda: None))
+    runtime.LocalWorker(store, state, "terminal.exe").tick()
+    assert store.agent(calls[0]["env"]["AGENT_TOKEN"])["id"] == row["id"]
+    # Restarts never probe the terminal again or add a second account.
+    mt5.calls.clear()
+    runtime.bootstrap_account(store, "terminal.exe")
+    assert mt5.calls == []
+
+
+def test_changed_trader_id_is_followed_by_existing_account(settings, monkeypatch, mt5):
+    store, state, *_ = runtime.configure()
+    owner, ident = account(store)
+    new = store.add_analyst({"name": "Feed", "description": "", "guild_id": "1", "channel_id": "2",
+                             "trader_id": "4", "active": True})
+    runtime.bootstrap_account(store, "terminal.exe", new)
+    runtime.bootstrap_account(store, "terminal.exe", new)
+    assert mt5.calls == []
+    with store.db() as db:
+        assert [r[0] for r in db.execute("SELECT analyst_id FROM follows WHERE account_id=?", (ident,))] == [new]
+        assert db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
+
+
+def test_env_mt5_login_is_used_for_registration(settings, monkeypatch, mt5):
+    store, state, *_ = runtime.configure()
+    runtime.bootstrap_admin(store, state)
+    monkeypatch.setenv("MT5_LOGIN", "81234567")
+    monkeypatch.setenv("MT5_SERVER", "Exness-MT5Trial7")
+    monkeypatch.setenv("MT5_PASSWORD", "trading-password")
+    monkeypatch.setenv("MT5_SYMBOL", "XAUUSD")
+    runtime.bootstrap_account(store, "terminal.exe")
+    assert mt5.calls[0] == {"path": "terminal.exe", "login": 81234567,
+                            "server": "Exness-MT5Trial7", "password": "trading-password"}
+    with store.db() as db:
+        assert db.execute("SELECT symbol,secret FROM accounts").fetchone()[:] == ("XAUUSD", None)
+
+
+@pytest.mark.parametrize("problem", ["live", "logged_out", "no_gold"])
+def test_unusable_terminal_account_is_not_registered(settings, monkeypatch, mt5, problem):
+    store, state, *_ = runtime.configure()
+    runtime.bootstrap_admin(store, state)
+    if problem == "live":
+        mt5.trade_mode = 2
+    elif problem == "logged_out":
+        mt5.logged_in = False
+    else:
+        mt5.names = ("EURUSD",)
+    with pytest.raises(ValueError, match={"live": "LIVE", "logged_out": "Save password",
+                                          "no_gold": "MT5_SYMBOL"}[problem]):
+        runtime.bootstrap_account(store, "terminal.exe")
+    assert "shutdown" in mt5.calls
+    with store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0
+
+
+def test_worker_token_command_needs_no_server(settings, monkeypatch, capsys):
+    from goldcopier import manage
+
+    store, state, *_ = runtime.configure()
+    owner, ident = account(store)
+    monkeypatch.setattr("sys.argv", ["manage", "worker-token", "--env-file", str(settings / "none.env")])
+    manage.main()
+    token = capsys.readouterr().out.split("AGENT_TOKEN=")[1].strip()
+    assert store.agent(token)["id"] == ident
 
 
 def test_env_analyst_is_created_once_and_never_silently_reenabled(settings, monkeypatch):
@@ -339,7 +504,7 @@ def test_env_analyst_is_created_once_and_never_silently_reenabled(settings, monk
 def test_incomplete_env_analyst_is_rejected(settings, monkeypatch):
     store, *_ = runtime.configure()
     monkeypatch.setenv("DISCORD_GUILD_ID", "100")
-    with pytest.raises(ValueError, match="all three numeric Discord IDs"):
+    with pytest.raises(ValueError, match="DISCORD_CHANNEL_ID and DISCORD_TRADER_ID"):
         runtime.bootstrap_analyst(store)
 
 
@@ -372,3 +537,40 @@ def test_full_runner_serves_its_database_and_stops_cleanly(settings, tmp_path):
     finally:
         assert runtime.stop_child(child)
     assert not (state / "runtime.lock").exists()
+
+
+def test_stale_lock_from_a_stopped_process_is_removed(tmp_path):
+    import subprocess
+    import sys
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    stale, live, unknown = tmp_path / "stale.lock", tmp_path / "live.lock", tmp_path / "unknown.lock"
+    stale.write_text(str(dead.pid))
+    live.write_text(str(os.getpid()))
+    unknown.write_text("")
+    assert runtime.clear_stale_lock(stale) and not stale.exists()
+    assert not runtime.clear_stale_lock(live) and live.exists()
+    assert not runtime.clear_stale_lock(unknown) and unknown.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows job objects")
+def test_services_die_when_the_runner_is_killed():
+    import subprocess
+    import sys
+
+    script = ("import subprocess, sys, time\n"
+              "from goldcopier import runtime\n"
+              "assert runtime.bind_children_to_runner()\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+              "print(child.pid, flush=True)\n"
+              "time.sleep(60)\n")
+    runner = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    child = int(runner.stdout.readline())
+    assert runtime.process_alive(child)
+    runner.kill()
+    runner.wait()
+    deadline = time.monotonic() + 10
+    while runtime.process_alive(child) and time.monotonic() < deadline:
+        time.sleep(.1)
+    assert not runtime.process_alive(child)

@@ -1,3 +1,5 @@
+> Multi-instrument update: the original gold-only signal descriptions below are superseded by [INSTRUMENTS_AND_EXNESS.md](INSTRUMENTS_AND_EXNESS.md). The existing local runtime workflow is retained.
+
 # Platform setup and operations
 
 ## Components and trust boundaries

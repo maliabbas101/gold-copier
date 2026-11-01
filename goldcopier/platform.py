@@ -20,7 +20,15 @@ from .auth import Vault, digest, password_hash
 from .billing import Billing
 from . import platform_models as M
 from .platform_store import PlatformStore, dump
-from .signals_v2 import parse_signal
+from .signals_v2 import parse_signal, parse_signals
+from .instruments import (
+    PairInput,
+    MappingInput,
+    save_pair,
+    delete_pair,
+    save_mapping,
+    delete_mapping,
+)
 
 WEB = Path(__file__).parent / "web"
 
@@ -136,7 +144,8 @@ def create_app():
             "managed_available": bool(os.environ.get("SUPERVISOR_TOKEN")),
             "reset_available": bool(os.environ.get("SMTP_HOST")),
             "local_worker_available": bool(
-                os.environ.get("LOCAL_RUNTIME_ID") and os.environ.get("MT5_TERMINAL_PATH")
+                os.environ.get("LOCAL_RUNTIME_ID")
+                and os.environ.get("MT5_TERMINAL_PATH")
             ),
         }
 
@@ -266,6 +275,93 @@ def create_app():
     @app.get("/api/dashboard")
     def dashboard(current=Depends(user)):
         return store.dashboard(current["id"])
+
+    @app.get("/api/pairs")
+    def pairs(current=Depends(user)):
+        from .instruments import registry
+
+        with store.db() as db:
+            return registry(db)
+
+    @app.post("/api/operator/pairs")
+    def pair_create(body: PairInput, current=Depends(admin)):
+        save_pair(store, body.model_dump())
+        return {"ok": True}
+
+    @app.put("/api/operator/pairs/{symbol}")
+    def pair_update(symbol: str, body: PairInput, current=Depends(admin)):
+        save_pair(store, body.model_dump(), symbol)
+        return {"ok": True}
+
+    @app.delete("/api/operator/pairs/{symbol}")
+    def pair_delete(symbol: str, current=Depends(admin)):
+        delete_pair(store, symbol)
+        return {"ok": True}
+
+    @app.get("/api/accounts/{account_id}/pairs")
+    def pair_mappings(account_id: str, current=Depends(user)):
+        with store.db() as db:
+            a = store.account(current["id"], account_id, db)
+            return {
+                "mappings": [
+                    dict(r)
+                    for r in db.execute(
+                        "SELECT * FROM account_pairs WHERE account_id=?", (account_id,)
+                    )
+                ],
+                "instruments": json.loads(a["snapshot"] or "{}").get("instruments", []),
+            }
+
+    @app.post("/api/accounts/{account_id}/pairs")
+    def mapping_create(account_id: str, body: MappingInput, current=Depends(user)):
+        save_mapping(store, current["id"], account_id, body.model_dump())
+        return {"ok": True}
+
+    @app.put("/api/accounts/{account_id}/pairs/{pair}")
+    def mapping_update(
+        account_id: str, pair: str, body: MappingInput, current=Depends(user)
+    ):
+        save_mapping(store, current["id"], account_id, body.model_dump(), pair)
+        return {"ok": True}
+
+    @app.delete("/api/accounts/{account_id}/pairs/{pair}")
+    def mapping_delete(account_id: str, pair: str, current=Depends(user)):
+        delete_mapping(store, current["id"], account_id, pair)
+        return {"ok": True}
+
+    @app.post("/api/accounts/exness")
+    def add_exness(body: M.ExnessAccountInput, current=Depends(user)):
+        if demo:
+            raise ValueError("Demo workspaces cannot collect Exness credentials")
+        from .exness_api import host, signing_key
+
+        signing_key(body.private_key)
+        gateway = host(body.gateway)
+        account_id = store.add_account(
+            current["id"],
+            {
+                "name": body.name,
+                "broker": "Exness",
+                "login": body.account_id,
+                "server": "Exness API",
+                "symbol": "XAUUSD",
+                "mode": "live",
+                "hosting": "api",
+                "password": json.dumps(
+                    {
+                        "api_key": body.api_key,
+                        "private_key": body.private_key,
+                        "gateway": gateway,
+                    }
+                ),
+            },
+            vault,
+        )
+        with store.db() as db:
+            db.execute(
+                "UPDATE accounts SET connector='exness' WHERE id=?", (account_id,)
+            )
+        return {"id": account_id, "read_only": not live}
 
     @app.post("/api/accounts")
     def add_account(body: M.AccountInput, current=Depends(user)):
@@ -397,21 +493,37 @@ def create_app():
             ) from exc
         return {"received": True}
 
+    def worker_pairs(account_id):
+        with store.db() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT m.* FROM account_pairs m JOIN pairs p ON p.symbol=m.pair WHERE m.account_id=? AND m.enabled=1 AND p.enabled=1",
+                    (account_id,),
+                )
+            ]
+
     @app.get("/api/worker/config")
     def worker_config(a=Depends(agent)):
-        if a["mode"] == "live" and not live:
+        if a["mode"] == "live" and not live and a.get("connector") != "exness":
             raise ValueError("Live execution disabled")
         return {
             "account_id": a["id"],
             "hosting": a["hosting"],
+            "connector": a.get("connector", "mt5"),
+            "api_credentials": json.loads(vault.decrypt(a["secret"], a["id"]))
+            if a.get("connector") == "exness" and a["secret"]
+            else None,
             "login": a["login"],
             "server": a["server"],
             "symbol": a["symbol"],
             "mode": a["mode"],
             "enabled": bool(a["enabled"]),
             "risk": json.loads(a["risk"]),
+            "pairs": worker_pairs(a["id"]),
             "password": vault.decrypt(a["secret"], a["id"])
-            if a["hosting"] == "managed" and a["secret"] else None,
+            if a["hosting"] == "managed" and a["secret"]
+            else None,
             "allow_live": live,
             "demo_workspace": demo,
         }
@@ -554,7 +666,8 @@ def create_app():
 
     @app.post("/api/operator/preview")
     def preview(body: M.Ingest, current=Depends(admin)):
-        return parse_signal(body.text)
+        signals = parse_signals(body.text)
+        return signals[0] if len(signals) == 1 else {"signals": signals}
 
     @app.post("/api/operator/signals")
     def ingest(body: M.Ingest, current=Depends(admin)):

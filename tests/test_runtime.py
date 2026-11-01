@@ -458,7 +458,7 @@ def test_env_mt5_login_is_used_for_registration(settings, monkeypatch, mt5):
         assert db.execute("SELECT symbol,secret FROM accounts").fetchone()[:] == ("XAUUSD", None)
 
 
-@pytest.mark.parametrize("problem", ["live", "logged_out", "no_gold"])
+@pytest.mark.parametrize("problem", ["live", "logged_out"])
 def test_unusable_terminal_account_is_not_registered(settings, monkeypatch, mt5, problem):
     store, state, *_ = runtime.configure()
     runtime.bootstrap_admin(store, state)
@@ -574,3 +574,15 @@ def test_services_die_when_the_runner_is_killed():
     while runtime.process_alive(child) and time.monotonic() < deadline:
         time.sleep(.1)
     assert not runtime.process_alive(child)
+
+
+def test_terminal_without_gold_can_register_a_forex_account(settings,monkeypatch,mt5):
+    store,state,*_=runtime.configure()
+    runtime.bootstrap_admin(store,state)
+    mt5.names=('EURUSD',)
+    runtime.bootstrap_account(store,'terminal.exe')
+    with store.db() as db:
+        row=db.execute('SELECT symbol FROM accounts').fetchone()
+        assert row['symbol']=='EURUSD'
+        # Non-gold limits must be explicitly configured, never copied from gold.
+        assert db.execute('SELECT COUNT(*) FROM account_pairs').fetchone()[0]==0

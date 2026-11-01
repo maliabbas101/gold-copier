@@ -53,7 +53,7 @@ def ingest(store, message, edit=False, *, billing=False, listener_id=None):
             old = json.loads(original[0])
             if any(
                 old.get(k) != parsed.get(k)
-                for k in ("side", "entry", "entry_low", "entry_high", "order_type")
+                for k in ("symbol", "side", "entry", "entry_low", "entry_high", "order_type")
             ):
                 logging.warning(
                     "Edited signal changed entry; explicit cancel/new signal is required"

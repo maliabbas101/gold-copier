@@ -83,3 +83,31 @@ test('copy button targets its own card rather than another selected account',asy
  const{dom,w,calls}=await setup(true,{demo:false,local_worker_available:true},dashboard);
  try{w.location.hash='accounts';await tick();w.document.querySelector('[data-action="toggle-copy"][data-account="second-account"]').click();await tick();assert.ok(calls.some(c=>c.url==='/api/accounts/second-account/enabled'));assert.ok(!calls.some(c=>c.url===`/api/accounts/${first.id}/enabled`))}finally{dom.window.close()}
 });
+
+
+test('pair mappings screen supports precise forex limits and broker catalogue suggestions',async()=>{
+ const {dom,w,calls}=await setup(true);
+ try{
+  w.location.hash='pairs';await tick();
+  assert.match(w.document.querySelector('h1').textContent,/Trading pairs/);
+  w.document.querySelector('[data-action="map-pair"]').click();await tick();
+  const f=w.document.querySelector('#mapping-form');assert.ok(f);
+  f.elements.namedItem('pair').value='EURUSD';f.elements.namedItem('broker_symbol').value='EURUSDm';
+  f.elements.namedItem('max_spread').value='0.00025';f.elements.namedItem('max_entry_distance').value='0.0008';
+  f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  const call=calls.find(c=>c.url.endsWith('/pairs')&&c.opt.method==='POST');assert.ok(call);
+  const body=JSON.parse(call.opt.body);assert.equal(body.pair,'EURUSD');assert.equal(body.max_spread,.00025);assert.equal(body.max_entry_distance,.0008);
+ }finally{dom.window.close()}
+});
+
+test('Exness connection form sends credentials only to authenticated API and never displays them in account cards',async()=>{
+ const {dom,w,calls}=await setup(true,{demo:false});
+ try{
+  w.location.hash='accounts';await tick();w.document.querySelector('[data-action="connect-exness"]').click();await tick();
+  const f=w.document.querySelector('#exness-form');assert.ok(f);assert.ok(f.elements.namedItem('consent').required);
+  f.elements.namedItem('name').value='Direct account';f.elements.namedItem('account_id').value='12345';f.elements.namedItem('api_key').value='example-public-key';f.elements.namedItem('private_key').value='example-private-key';f.elements.namedItem('gateway').value='https://gateway.exness.com';
+  f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  const call=calls.find(c=>c.url==='/api/accounts/exness');assert.ok(call);assert.equal(call.opt.headers['X-CSRF-Token'],'csrf-test');
+  assert.equal(JSON.parse(call.opt.body).private_key,'example-private-key');
+ }finally{dom.window.close()}
+});

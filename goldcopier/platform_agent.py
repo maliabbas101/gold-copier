@@ -186,6 +186,8 @@ def execute(job, broker, ledger):
         logging.warning("Preflight rejected: %s", exc)
         ledger.finish(job["id"], {"state": "rejected", "detail": str(exc)[:400]})
         return
+    if hasattr(broker, "operation_keys"):
+        broker.operation_keys(requests, job["id"])
     ledger.prepared(job["id"], requests)
     final = {"state": "executed", "detail": "Broker confirmed request"}
     try:
@@ -241,8 +243,8 @@ def monitor(broker, ledger, allow_partial=True):
             positions = broker.positions_for(signal["signal_id"])
             if not positions:
                 continue  # May still be pending; never infer a failed entry from this.
-            info, tick = broker.quote()
             for p in positions:
+                info, tick = broker.quote(p.symbol)
                 key = str(p.ticket)
                 track = state.setdefault(
                     key,
@@ -272,6 +274,10 @@ def monitor(broker, ledger, allow_partial=True):
                     requests = broker.prepare_control(
                         {"action": "breakeven", "position": p.ticket}
                     )
+                    if hasattr(broker, "operation_keys"):
+                        broker.operation_keys(
+                            requests, "be-" + signal["signal_id"] + "-" + str(p.ticket)
+                        )
                     for req in requests:
                         result = broker.submit(req)
                         if result["state"] == "executed":
@@ -329,6 +335,8 @@ def monitor(broker, ledger, allow_partial=True):
                     except ValueError as exc:
                         ledger.finish(ident, {"state": "rejected", "detail": str(exc)})
                         continue
+                    if hasattr(broker, "operation_keys"):
+                        broker.operation_keys([request], ident)
                     ledger.prepared(ident, [request])
                     try:
                         result = broker.submit(request)
@@ -362,13 +370,18 @@ def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    url = (os.environ.get("COPIER_URL") or os.environ.get("PUBLIC_URL") or "http://127.0.0.1:8000").rstrip("/")
+    url = (
+        os.environ.get("COPIER_URL")
+        or os.environ.get("PUBLIC_URL")
+        or "http://127.0.0.1:8000"
+    ).rstrip("/")
     token = os.environ.get("AGENT_TOKEN", "").strip()
     terminal_path = find_terminal()
     if not token:
-        raise ValueError("Set AGENT_TOKEN in .env. Create one without the server using python -m goldcopier.manage worker-token, or use python -m goldcopier.manage run for automatic provisioning")
-    if not terminal_path:
-        raise ValueError("Set MT5_TERMINAL_PATH in .env to your terminal64.exe")
+        raise ValueError(
+            "Set AGENT_TOKEN in .env. Create one without the server using python -m goldcopier.manage worker-token, or use python -m goldcopier.manage run for automatic provisioning"
+        )
+
     parsed = urlparse(url)
     if parsed.scheme != "https" and not (
         parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
@@ -401,16 +414,23 @@ def main():
                 and os.environ.get("ALLOW_LIVE_TRADING", "false") == "true",
                 baseline=ledger.baseline(),
             )
-            import MetaTrader5 as mt
+            if cfg.get("connector") == "exness":
+                from .exness_broker import ExnessBroker
 
-            init = terminal_options(cfg)
-            if not mt.initialize(**init):
-                raise ValueError(
-                    f"MT5 terminal connection failed: {mt.last_error()}. "
-                    "Check the MT5 login and server in the app and MT5_PASSWORD "
-                    "in .env (or the terminal's saved login), then restart the server."
-                )
-            broker = PlatformBroker(cfg, mt)
+                broker = ExnessBroker(cfg, ledger)
+            else:
+                if not terminal_path:
+                    raise ValueError("Set MT5_TERMINAL_PATH for an MT5 worker")
+                import MetaTrader5 as mt
+
+                init = terminal_options(cfg)
+                if not mt.initialize(**init):
+                    raise ValueError(
+                        f"MT5 terminal connection failed: {mt.last_error()}. "
+                        "Check the MT5 login and server in the app and MT5_PASSWORD "
+                        "in .env (or the terminal's saved login), then restart the server."
+                    )
+                broker = PlatformBroker(cfg, mt)
             tick = 0
             while True:
                 # Validate the token before software-managed exits. A revoked worker must terminate.
@@ -426,6 +446,7 @@ def main():
                     if updated["account_id"] != cfg["account_id"]:
                         raise ValueError("Worker account binding changed")
                     cfg["risk"] = updated["risk"]
+                    cfg["pairs"] = updated.get("pairs", [])
                     cfg["enabled"] = updated["enabled"]
                     cfg["allow_live"] = (
                         updated["allow_live"]
@@ -456,24 +477,27 @@ def main():
                         response.raise_for_status()
                     ledger.sync(client)
                     # Management commands remain eligible when entries are paused or uncertain.
-                    response = client.post("/api/worker/claim")
-                    response.raise_for_status()
-                    job = response.json()
-                    if job:
-                        if job["signal"]["action"] == "entry" and (
-                            ledger.unresolved() or Path("PAUSE").exists()
-                        ):
-                            ledger.reserve(job)
-                            ledger.finish(
-                                job["id"],
-                                {
-                                    "state": "rejected",
-                                    "detail": "Worker paused pending reconciliation",
-                                },
-                            )
-                        else:
-                            execute(job, broker, ledger)
-                        ledger.sync(client)
+                    for _ in range(8):
+                        response = client.post("/api/worker/claim")
+                        response.raise_for_status()
+                        job = response.json()
+                        if not job:
+                            break
+                        if job:
+                            if job["signal"]["action"] == "entry" and (
+                                ledger.unresolved() or Path("PAUSE").exists()
+                            ):
+                                ledger.reserve(job)
+                                ledger.finish(
+                                    job["id"],
+                                    {
+                                        "state": "rejected",
+                                        "detail": "Worker paused pending reconciliation",
+                                    },
+                                )
+                            else:
+                                execute(job, broker, ledger)
+                            ledger.sync(client)
                 except (httpx.HTTPError, ValueError, sqlite3.Error):
                     logging.exception(
                         "Worker synchronization failed; entries are not resent"

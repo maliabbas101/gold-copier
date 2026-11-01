@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 from .auth import digest, password_hash, password_valid
 from .platform_models import Risk
-from .signals_v2 import parse_signal
+from .signals_v2 import parse_signals
 
 
 def uid():
@@ -40,6 +40,9 @@ class PlatformStore:
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             INSERT OR IGNORE INTO settings VALUES('paused','false');
             """)
+            from .instruments import migrate
+
+            migrate(db)
 
     @contextmanager
     def db(self):
@@ -149,9 +152,12 @@ class PlatformStore:
             raise ValueError("Managed hosting requires the MT5 trading password")
         secret = vault.encrypt(password, account_id) if password else None
         with self.db() as db:
-            if analyst_id and not db.execute(
-                "SELECT 1 FROM analysts WHERE id=? AND active=1", (analyst_id,)
-            ).fetchone():
+            if (
+                analyst_id
+                and not db.execute(
+                    "SELECT 1 FROM analysts WHERE id=? AND active=1", (analyst_id,)
+                ).fetchone()
+            ):
                 raise ValueError("Choose an active analyst to copy")
             db.execute(
                 "INSERT INTO accounts(id,user_id,name,broker,login,server,symbol,mode,hosting,secret,risk,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -170,8 +176,32 @@ class PlatformStore:
                     time.time(),
                 ),
             )
+            pair = (
+                "XAUUSD"
+                if data["symbol"].startswith("XAUUSD")
+                and db.execute(
+                    "SELECT 1 FROM pairs WHERE symbol='XAUUSD' AND enabled=1"
+                ).fetchone()
+                else None
+            )
+            if pair:
+                r = Risk().model_dump()
+                db.execute(
+                    "INSERT INTO account_pairs VALUES(?,?,?,?,?,?,1)",
+                    (
+                        account_id,
+                        pair,
+                        data["symbol"],
+                        r["max_spread"],
+                        r["max_entry_distance"],
+                        r["max_lots"],
+                    ),
+                )
             if analyst_id:
-                db.execute("INSERT INTO follows(account_id,analyst_id) VALUES(?,?)", (account_id, analyst_id))
+                db.execute(
+                    "INSERT INTO follows(account_id,analyst_id) VALUES(?,?)",
+                    (account_id, analyst_id),
+                )
             self.event(
                 db,
                 user,
@@ -337,9 +367,13 @@ class PlatformStore:
         return ident
 
     def ingest(self, analyst_id, source_id, text, created, ttl=60, billing=False):
+        from .instruments import canonical
+
         if not time.time() - ttl <= created <= time.time() + 5:
             raise ValueError("Signal expired or future-dated")
-        payload = {**parse_signal(text), "origin": "analyst"}
+        parsed = parse_signals(text)  # Validate the entire message before any insert.
+        if len(parsed) > 1 and len(source_id) > 96:
+            raise ValueError("Batch source reference is too long")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             if (
@@ -353,91 +387,140 @@ class PlatformStore:
                 "SELECT 1 FROM analysts WHERE id=? AND active=1", (analyst_id,)
             ).fetchone():
                 raise ValueError("Unknown or inactive analyst")
-            if db.execute(
-                "SELECT 1 FROM feeds WHERE analyst_id=? AND source_id=?",
-                (analyst_id, source_id),
-            ).fetchone():
-                return {"duplicate": True, "queued": 0}
-            if payload["action"] != "entry":
-                reference = db.execute(
-                    "SELECT id FROM feeds WHERE analyst_id=? AND lower(source_id)=? AND json_extract(payload,'$.action')='entry'",
-                    (analyst_id, payload["signal_id"]),
-                ).fetchone()
-                if not reference:
-                    raise ValueError(
-                        "Management reference does not belong to this analyst"
-                    )
-                payload["signal_id"] = reference["id"]
-            # Suppress identical entry reposts during their active ingestion window.
             if (
-                payload["action"] == "entry"
-                and db.execute(
-                    "SELECT 1 FROM feeds WHERE analyst_id=? AND payload=? AND created>?",
-                    (analyst_id, dump(payload), time.time() - ttl),
+                db.execute(
+                    "SELECT 1 FROM signal_messages WHERE analyst_id=? AND source_id=?",
+                    (analyst_id, source_id),
+                ).fetchone()
+                or db.execute(
+                    "SELECT 1 FROM feeds WHERE analyst_id=? AND source_id=?",
+                    (analyst_id, source_id),
                 ).fetchone()
             ):
-                return {"duplicate": True, "queued": 0}
-            feed = uid()
+                return {"duplicate": True, "queued": 0, "ids": [], "skipped": []}
+            payloads = []
+            for item in parsed:
+                payload = {**item, "origin": "analyst"}
+                if payload["action"] == "entry":
+                    payload["symbol"] = canonical(db, payload["symbol"])
+                else:
+                    reference = db.execute(
+                        "SELECT id,payload FROM feeds WHERE analyst_id=? AND lower(source_id)=? AND json_extract(payload,'$.action')='entry'",
+                        (analyst_id, payload["signal_id"]),
+                    ).fetchone()
+                    if not reference:
+                        raise ValueError(
+                            "Management reference does not belong to this analyst"
+                        )
+                    payload["signal_id"] = reference["id"]
+                    payload["symbol"] = json.loads(reference["payload"])["symbol"]
+                payloads.append(payload)
             db.execute(
-                "INSERT INTO feeds VALUES(?,?,?,?,?)",
-                (feed, analyst_id, source_id, dump(payload), created),
+                "INSERT INTO signal_messages VALUES(?,?,?)",
+                (analyst_id, source_id, created),
             )
             rows = db.execute(
                 "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=?",
                 (analyst_id,),
             ).fetchall()
             queued = 0
-            for a in rows:
-                if payload["action"] == "entry":
-                    if (
-                        not a["enabled"]
-                        or not a["heartbeat"]
-                        or time.time() - a["heartbeat"] > 30
-                    ):
-                        continue
-                    if billing:
-                        sub = db.execute(
-                            "SELECT * FROM subscriptions WHERE user_id=?",
-                            (a["user_id"],),
-                        ).fetchone()
+            ids = []
+            skipped = []
+            for index, payload in enumerate(payloads):
+                feed = uid()
+                ids.append(feed)
+                ref = source_id if len(payloads) == 1 else f"{source_id}-{index + 1}"
+                db.execute(
+                    "INSERT INTO feeds VALUES(?,?,?,?,?)",
+                    (feed, analyst_id, ref, dump(payload), created),
+                )
+                for a in rows:
+                    risk = json.loads(a["follow_risk"] or a["risk"])
+                    if payload["action"] == "entry":
                         if (
-                            not sub
-                            or sub["status"] not in ("active", "trialing")
-                            or not sub["period_end"]
-                            or sub["period_end"] < time.time()
+                            not a["enabled"]
+                            or not a["heartbeat"]
+                            or time.time() - a["heartbeat"] > 30
                         ):
                             continue
-                elif not db.execute(
-                    "SELECT 1 FROM pjobs WHERE account_id=? AND feed_id=?",
-                    (a["id"], payload["signal_id"]),
-                ).fetchone():
-                    continue
-                jobpayload = (
-                    {**payload, "signal_id": feed}
-                    if payload["action"] == "entry"
-                    else payload
-                )
-                db.execute(
-                    "INSERT INTO pjobs(id,account_id,feed_id,payload,risk,created,expires) VALUES(?,?,?,?,?,?,?)",
-                    (
-                        uid(),
+                        if billing:
+                            sub = db.execute(
+                                "SELECT * FROM subscriptions WHERE user_id=?",
+                                (a["user_id"],),
+                            ).fetchone()
+                            if (
+                                not sub
+                                or sub["status"] not in ("active", "trialing")
+                                or not sub["period_end"]
+                                or sub["period_end"] < time.time()
+                            ):
+                                continue
+                        mapping = db.execute(
+                            "SELECT * FROM account_pairs WHERE account_id=? AND pair=? AND enabled=1",
+                            (a["id"], payload["symbol"]),
+                        ).fetchone()
+                        if not mapping:
+                            reason = f"No enabled mapping for {payload['symbol']}"
+                            self.event(db, a["user_id"], "alert", reason, a["id"])
+                            skipped.append(
+                                {
+                                    "account_id": a["id"],
+                                    "pair": payload["symbol"],
+                                    "reason": reason,
+                                }
+                            )
+                            continue
+                        risk.update(
+                            {
+                                k: mapping[k]
+                                for k in ("max_spread", "max_entry_distance")
+                            }
+                        )
+                        risk["max_lots"] = min(risk["max_lots"], mapping["max_lots"])
+                        jobpayload = {
+                            **payload,
+                            "signal_id": feed,
+                            "broker_symbol": mapping["broker_symbol"],
+                        }
+                    else:
+                        original = db.execute(
+                            "SELECT payload FROM pjobs WHERE account_id=? AND feed_id=? AND json_extract(payload,'$.action')='entry'",
+                            (a["id"], payload["signal_id"]),
+                        ).fetchone()
+                        if not original:
+                            continue
+                        original = json.loads(original[0])
+                        jobpayload = {
+                            **payload,
+                            "broker_symbol": original.get("broker_symbol", a["symbol"]),
+                        }
+                    db.execute(
+                        "INSERT INTO pjobs(id,account_id,feed_id,payload,risk,created,expires) VALUES(?,?,?,?,?,?,?)",
+                        (
+                            uid(),
+                            a["id"],
+                            feed,
+                            dump(jobpayload),
+                            dump(risk),
+                            time.time(),
+                            created + ttl,
+                        ),
+                    )
+                    self.event(
+                        db,
+                        a["user_id"],
+                        "signal",
+                        f"{payload['symbol']} signal queued: {payload['action']}",
                         a["id"],
-                        feed,
-                        dump(jobpayload),
-                        a["follow_risk"] or a["risk"],
-                        time.time(),
-                        created + ttl,
-                    ),
-                )
-                self.event(
-                    db,
-                    a["user_id"],
-                    "signal",
-                    "Signal queued: " + payload["action"],
-                    a["id"],
-                )
-                queued += 1
-            return {"id": feed, "queued": queued, "duplicate": False}
+                    )
+                    queued += 1
+            return {
+                "id": ids[0],
+                "ids": ids,
+                "queued": queued,
+                "duplicate": False,
+                "skipped": skipped,
+            }
 
     def control(self, user, account_id, payload):
         with self.db() as db:
@@ -515,6 +598,10 @@ class PlatformStore:
                     and sub["period_end"]
                     and sub["period_end"] > time.time()
                 )
+            db.execute(
+                "UPDATE pjobs SET state='cancelled' WHERE account_id=? AND state='queued' AND json_extract(payload,'$.action')='entry' AND NOT EXISTS (SELECT 1 FROM account_pairs m JOIN pairs p ON p.symbol=m.pair WHERE m.account_id=pjobs.account_id AND m.pair=json_extract(pjobs.payload,'$.symbol') AND m.broker_symbol=json_extract(pjobs.payload,'$.broker_symbol') AND m.enabled=1 AND p.enabled=1)",
+                (a["id"],),
+            )
             unresolved = db.execute(
                 "SELECT 1 FROM pjobs WHERE account_id=? AND state IN ('claimed','uncertain')",
                 (a["id"],),
@@ -597,6 +684,13 @@ class PlatformStore:
                 a["snapshot"] = json.loads(a["snapshot"] or "{}")
                 a["online"] = bool(a["heartbeat"] and time.time() - a["heartbeat"] < 30)
                 a["credential_stored"] = bool(row["secret"])
+                a["pairs"] = [
+                    dict(m)
+                    for m in db.execute(
+                        "SELECT * FROM account_pairs WHERE account_id=? ORDER BY pair",
+                        (a["id"],),
+                    )
+                ]
                 a["follows"] = [
                     dict(f)
                     for f in db.execute(
@@ -644,7 +738,12 @@ class PlatformStore:
                 ]
                 == "true"
             )
+        with self.db() as db:
+            from .instruments import registry
+
+            pairs = registry(db)
         return {
+            "pairs": pairs,
             "accounts": accounts,
             "analysts": analysts,
             "jobs": jobs,

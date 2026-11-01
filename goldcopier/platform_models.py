@@ -24,7 +24,7 @@ class AccountInput(Model):
     broker: Literal["Exness", "PrimeXBT", "Other MT5"]
     login: str = Field(pattern=r"^\d{3,20}$")
     server: str = Field(min_length=2, max_length=100)
-    symbol: str = Field(default="XAUUSD", pattern=r"^XAUUSD[A-Za-z0-9._-]{0,12}$")
+    symbol: str = Field(default="XAUUSD", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
     mode: Literal["demo", "live"] = "demo"
     hosting: Literal["self", "managed"] = "self"
     analyst_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -42,8 +42,8 @@ class Risk(Model):
     drawdown_pct: float = Field(default=10, gt=0, le=30)
     total_risk_pct: float = Field(default=3, gt=0, le=10)
     max_open: int = Field(default=2, ge=1, le=10)
-    max_spread: float = Field(default=0.5, gt=0, le=20)
-    max_entry_distance: float = Field(default=0.5, gt=0, le=20)
+    max_spread: float = Field(default=0.5, gt=0, le=1e9)
+    max_entry_distance: float = Field(default=0.5, gt=0, le=1e9)
     tp1_close_pct: float = Field(default=50, ge=0, le=100)
     tp2_close_pct: float = Field(default=50, ge=0, le=100)
     be_enabled: bool = True
@@ -100,6 +100,7 @@ class Snapshot(Model):
     positions: list[dict] = Field(default_factory=list, max_length=100)
     orders: list[dict] = Field(default_factory=list, max_length=100)
     deals: list[dict] = Field(default_factory=list, max_length=100)
+    instruments: list[str] = Field(default_factory=list, max_length=1000)
     daily_pnl: float = 0
     error: str | None = Field(default=None, max_length=300)
 
@@ -143,3 +144,12 @@ class AutoResult(Model):
     id: str = Field(pattern=r"^auto-[0-9a-f]{32}$")
     signal_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     result: JobResult
+
+
+class ExnessAccountInput(Model):
+    name: str = Field(min_length=2, max_length=60)
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    api_key: str = Field(min_length=8, max_length=256)
+    private_key: str = Field(min_length=64, max_length=4096)
+    gateway: str = Field(min_length=10, max_length=300)
+    consent: Literal[True]

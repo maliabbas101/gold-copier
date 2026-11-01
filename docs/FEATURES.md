@@ -21,10 +21,12 @@ This implementation uses the public descriptions of Inspired Analyst Bot as a fu
 | Pending follower entries | Supported through Discord LIMIT/STOP signals |
 | Hot standby / zero-downtime claims | Not implemented as an automatic trading failover mechanism; supervised recovery documented |
 | P&L and trade visibility | Snapshot equity chart, current positions/orders, today's closed deals, realized P&L, command history and CSV |
-| Multiple instruments | XAUUSD only, as originally requested |
-| Broker compatibility | MT5 adapter; Exness/PrimeXBT MT5 require account-specific testing; PXTrader/MT4 unsupported |
+| Multiple instruments | Configurable canonical pair directory, aliases, per-account broker mappings and limits; multi-signal intake |
+| Broker compatibility | MT5 plus the official Exness signed API connector for eligible accounts; acceptance testing still required; PXTrader/MT4 unsupported |
 | Public commercial readiness | Not represented as complete: broker validation, payment acceptance, security review, legal/business configuration and deployment are required |
 
 The local demo is a real runnable application with labelled sample records and broker claims disabled. The standalone HTML preview uses a read-only data adapter. Neither implies that a live broker or payment provider has been connected.
 
 Automated tests verify application behavior with fake broker/provider responses. They do not certify Windows/MT5 behavior, broker execution, infrastructure uptime, or payment-provider approval.
+
+The multi-instrument / direct API update supersedes the original gold-only limitations. See [INSTRUMENTS_AND_EXNESS.md](INSTRUMENTS_AND_EXNESS.md).

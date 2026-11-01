@@ -15,12 +15,15 @@ from .platform_models import Risk
 MAGIC = 740127
 
 
-def floor_lots(volume, step):
+def floor_lots(volume, step, minimum=0):
+    if volume < minimum:
+        return 0.0
     return float(
-        (Decimal(str(volume)) / Decimal(str(step))).to_integral_value(
-            rounding=ROUND_DOWN
-        )
+        (
+            (Decimal(str(volume)) - Decimal(str(minimum))) / Decimal(str(step))
+        ).to_integral_value(rounding=ROUND_DOWN)
         * Decimal(str(step))
+        + Decimal(str(minimum))
     )
 
 
@@ -28,6 +31,33 @@ class PlatformBroker(MT5Broker):
     def __init__(self, cfg, module=None):
         self.baseline = cfg.setdefault("baseline", {})
         super().__init__(cfg, module)
+
+    def quote(self, symbol=None):
+        symbol = symbol or self.cfg["symbol"]
+        if not self.mt.symbol_select(symbol, True):
+            raise ValueError(f"Broker symbol unavailable: {symbol}")
+        info, tick = self.mt.symbol_info(symbol), self.mt.symbol_info_tick(symbol)
+        if info is None or tick is None or abs(time.time() - tick.time) > 10:
+            raise ValueError(f"Missing or stale quote: {symbol}")
+        return info, tick
+
+    def entry_symbol(self, signal):
+        symbol = signal.get("broker_symbol")
+        if symbol:
+            return symbol
+        mapping = next(
+            (
+                m
+                for m in self.cfg.get("pairs", [])
+                if m["pair"] == signal["symbol"] and m.get("enabled", True)
+            ),
+            None,
+        )
+        if mapping:
+            return mapping["broker_symbol"]
+        if signal.get("symbol") == "XAUUSD":
+            return self.cfg["symbol"]  # legacy journal compatibility
+        raise ValueError("Signal has no explicit broker symbol mapping")
 
     def check_account(self):
         a = self.mt.account_info()
@@ -85,7 +115,8 @@ class PlatformBroker(MT5Broker):
     def prepare_entry(self, signal, risk, job_id):
         risk = Risk(**risk).model_dump()
         a = self.check_account()
-        info, tick = self.quote()
+        symbol = self.entry_symbol(signal)
+        info, tick = self.quote(symbol)
         if tick.ask < tick.bid or tick.ask - tick.bid > risk["max_spread"]:
             raise ValueError("Spread exceeds maximum")
         buy = signal["side"] == "BUY"
@@ -115,16 +146,16 @@ class PlatformBroker(MT5Broker):
                 raise ValueError("Pending entry is on the wrong side of market")
         self.protection(risk, a)
         used = self.exposure(risk, a)
-        loss = self.mt.order_calc_profit(
-            kind, self.cfg["symbol"], 1.0, price, signal["sl"]
-        )
+        loss = self.mt.order_calc_profit(kind, symbol, 1.0, price, signal["sl"])
         if loss is None or not math.isfinite(loss) or loss >= 0:
             raise ValueError("Cannot calculate broker stop-loss risk")
         cap = a.equity * risk["risk_pct"] / 100
         budget = min(cap, risk["cash_risk"]) if risk["sizing"] == "cash" else cap
         raw = risk["fixed_lots"] if risk["sizing"] == "fixed" else budget / abs(loss)
         volume = floor_lots(
-            min(raw, risk["max_lots"], info.volume_max), info.volume_step
+            min(raw, risk["max_lots"], info.volume_max),
+            info.volume_step,
+            info.volume_min,
         )
         if volume < info.volume_min:
             raise ValueError("Minimum broker lot exceeds budget")
@@ -153,7 +184,7 @@ class PlatformBroker(MT5Broker):
             "action": self.mt.TRADE_ACTION_PENDING
             if pending
             else self.mt.TRADE_ACTION_DEAL,
-            "symbol": self.cfg["symbol"],
+            "symbol": symbol,
             "type": kind,
             "volume": volume,
             "price": price,
@@ -233,7 +264,7 @@ class PlatformBroker(MT5Broker):
         }
 
     def positions_for(self, signal_id):
-        positions = self.mt.positions_get(symbol=self.cfg["symbol"])
+        positions = self.mt.positions_get()
         if positions is None:
             raise ValueError("Cannot inspect broker positions")
         comment = "gc2:" + signal_id[:20]
@@ -258,10 +289,9 @@ class PlatformBroker(MT5Broker):
 
     def prepare_control(self, command):
         self.check_account()
-        self.quote()
         requests = []
-        positions = self.mt.positions_get(symbol=self.cfg["symbol"])
-        orders = self.mt.orders_get(symbol=self.cfg["symbol"])
+        positions = self.mt.positions_get()
+        orders = self.mt.orders_get()
         if positions is None or orders is None:
             raise ValueError("Cannot inspect broker orders")
         if command.get("signal_id"):
@@ -348,9 +378,9 @@ class PlatformBroker(MT5Broker):
         return requests
 
     def close_request(self, p, percent=None, volume=None):
-        info, tick = self.quote()
+        info, tick = self.quote(p.symbol)
         requested = volume if volume is not None else p.volume * percent / 100
-        lots = floor_lots(min(requested, p.volume), info.volume_step)
+        lots = floor_lots(min(requested, p.volume), info.volume_step, info.volume_min)
         if lots < info.volume_min:
             return None
         remainder = p.volume - lots
@@ -374,7 +404,6 @@ class PlatformBroker(MT5Broker):
 
     def snapshot(self):
         a = self.check_account()
-        self.quote()
         positions = self.mt.positions_get()
         orders = self.mt.orders_get()
         if positions is None or orders is None:
@@ -415,6 +444,9 @@ class PlatformBroker(MT5Broker):
                 if d.type in (self.mt.DEAL_TYPE_BUY, self.mt.DEAL_TYPE_SELL)
                 and d.entry in (self.mt.DEAL_ENTRY_OUT, self.mt.DEAL_ENTRY_OUT_BY)
             ],
+            "instruments": [s.name for s in self.mt.symbols_get()][:1000]
+            if hasattr(self.mt, "symbols_get")
+            else [],
             "positions": [
                 {
                     "ticket": p.ticket,

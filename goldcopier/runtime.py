@@ -274,7 +274,7 @@ def bootstrap_analyst(store):
 
 
 def read_terminal(terminal):
-    """Login, server, mode and gold symbol of the account open in the MT5 terminal."""
+    """Login, server, mode and preferred symbol of the account open in the MT5 terminal."""
     import MetaTrader5 as mt
 
     options = {"path": terminal}
@@ -292,16 +292,16 @@ def read_terminal(terminal):
         info = mt.account_info()
         if info is None or not info.login:
             raise ValueError("MT5 is not logged in to a trading account. " + hint)
-        names = [s.name for s in mt.symbols_get("XAUUSD*") or ()]
+        names = [s.name for s in mt.symbols_get("*") or ()]
         demo = info.trade_mode == mt.ACCOUNT_TRADE_MODE_DEMO
     finally:
         mt.shutdown()
     symbol = os.environ.get("MT5_SYMBOL", "").strip()
     if not symbol:
-        gold = sorted((n for n in names if re.fullmatch(r"XAUUSD[A-Za-z0-9._-]{0,12}", n)), key=len)
-        if not gold:
-            raise ValueError("No XAUUSD symbol found in MT5. Set MT5_SYMBOL in .env to your broker's gold symbol.")
-        symbol = gold[0]
+        preferred=sorted((n for n in names if re.fullmatch(r'XAUUSD[A-Za-z0-9._-]{0,12}',n)),key=len)
+        available=preferred or sorted((n for n in names if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,31}',n)))
+        if not available:raise ValueError('No tradable symbols found. Set MT5_SYMBOL to an exact broker instrument.')
+        symbol=available[0]
     return {"login": str(info.login), "server": info.server, "symbol": symbol,
             "mode": "demo" if demo else "live"}
 

@@ -253,7 +253,7 @@ def test_signal_fanout_duplicate_and_account_bound_result(workspace):
     token, agent = worker_ready(w, a)
     r = w.store.ingest(w.analyst, "100", TEXT, time.time())
     assert r["queued"] == 1
-    assert w.store.ingest(w.analyst, "101", TEXT, time.time())["duplicate"]
+    assert w.store.ingest(w.analyst, "100", TEXT, time.time())["duplicate"]
     job = w.store.claim(agent)
     assert job and job["signal"]["targets"] == [2710, 2720]
     assert w.store.claim(agent) is None
@@ -358,7 +358,7 @@ def test_rate_limit_persisted(workspace):
 @pytest.mark.parametrize(
     "text",
     [
-        TEXT.replace("XAUUSD", "EURUSD"),
+        TEXT.replace("XAUUSD", "EUR USD"),
         TEXT.replace("2700 - 2701", "2715"),
         TEXT.replace("TP2: 2720", "TP2: 2709"),
         TEXT.replace("BUY", "BUY LIMIT"),

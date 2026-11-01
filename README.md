@@ -99,3 +99,9 @@ npm.cmd test
 Automated execution tests use a simulated MT5 API. Verify the complete Discord-to-MT5
 flow on a broker demo account before considering live use. Live trading is disabled
 by default.
+
+## Multi-instrument update and Exness API
+
+Open **Trading pairs** for canonical pair/alias CRUD and per-account broker mappings, with per-instrument spread, entry-distance, and lot limits. Multiple distinct signals, including identical-price signals with different message IDs, are queued independently. A single message may contain up to 20 complete signal blocks separated by `---`.
+
+**Accounts → Exness API** provisions the official signed direct connector for eligible Exness trading accounts. It is separate from MT5 and remains read-only with live execution disabled. See [docs/INSTRUMENTS_AND_EXNESS.md](docs/INSTRUMENTS_AND_EXNESS.md) for eligibility, configuration, confirmation semantics, acceptance limits, and migration instructions. No live API credentials were used to test this integration.

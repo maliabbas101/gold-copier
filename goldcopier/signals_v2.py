@@ -1,4 +1,4 @@
-"""Deterministic XAUUSD signal/management grammar; no guessing financial instructions."""
+"""Deterministic multi-instrument signal/management grammar; no guessing financial instructions."""
 
 import re
 import math
@@ -22,7 +22,7 @@ def parse_signal(text):
     if partial:
         if len(lines) != 2:
             raise ValueError("PARTIAL requires PERCENT")
-        m = re.fullmatch(r"PERCENT:\s*(\d+(?:\.\d{1,3})?)", lines[1])
+        m = re.fullmatch(r"PERCENT:\s*(\d+(?:\.\d{1,10})?)", lines[1])
         if not m or not 0 < float(m[1]) <= 100:
             raise ValueError("Invalid partial percentage")
         return {
@@ -31,21 +31,23 @@ def parse_signal(text):
             "percent": float(m[1]),
         }
     update = re.fullmatch(r"UPDATE\s+SIGNAL:\s*([A-Z0-9_-]{1,100})", lines[0])
-    head = re.fullmatch(r"XAUUSD\s+(BUY|SELL)(?:\s+(MARKET|LIMIT|STOP))?", lines[0])
+    head = re.fullmatch(
+        r"([A-Z0-9][A-Z0-9._-]{0,31})\s+(BUY|SELL)(?:\s+(MARKET|LIMIT|STOP))?", lines[0]
+    )
     if not head and not update:
         raise ValueError(
-            "Use XAUUSD BUY/SELL [MARKET/LIMIT/STOP] or a referenced management command"
+            "Use SYMBOL BUY/SELL [MARKET/LIMIT/STOP] or a referenced management command"
         )
     values = {}
     for line in lines[1:]:
         m = re.fullmatch(
-            r"(ENTRY|SL|TP|TP1|TP2|BE):\s*(\d+(?:\.\d{1,3})?)(?:\s*-\s*(\d+(?:\.\d{1,3})?))?",
+            r"(ENTRY|SL|TP|TP1|TP2|BE):\s*(\d+(?:\.\d{1,10})?)(?:\s*-\s*(\d+(?:\.\d{1,10})?))?",
             line,
         )
         if not m or m[1] in values or (m[3] and m[1] != "ENTRY"):
             raise ValueError("Invalid or duplicate field")
         nums = [float(x) for x in (m[2], m[3]) if x]
-        if any(not math.isfinite(x) or not 0 < x < 1_000_000 for x in nums):
+        if any(not math.isfinite(x) or not 0 < x < 1_000_000_000_000 for x in nums):
             raise ValueError("Invalid price")
         values[m[1]] = nums if len(nums) == 2 else nums[0]
     if update:
@@ -66,7 +68,7 @@ def parse_signal(text):
     low, high = sorted(entry) if isinstance(entry, list) else (entry, entry)
     if isinstance(entry, list) and low == high:
         raise ValueError("Entry range requires two different prices")
-    kind = head[2] or "MARKET"
+    kind = head[3] or "MARKET"
     if kind != "MARKET" and isinstance(entry, list):
         raise ValueError("Pending orders require an exact entry")
     targets = (
@@ -75,7 +77,7 @@ def parse_signal(text):
         else [values["TP1"]] + ([values["TP2"]] if "TP2" in values else [])
     )
     sl, be = values["SL"], values["BE"]
-    buy = head[1] == "BUY"
+    buy = head[2] == "BUY"
     if (buy and not sl < low <= high < be <= targets[0]) or (
         not buy and not targets[0] <= be < low <= high < sl
     ):
@@ -86,8 +88,8 @@ def parse_signal(text):
         raise ValueError("Targets must progress in the trade direction")
     return {
         "action": "entry",
-        "symbol": "XAUUSD",
-        "side": head[1],
+        "symbol": head[1],
+        "side": head[2],
         "order_type": kind,
         "entry": (low + high) / 2,
         "entry_low": low,
@@ -98,3 +100,15 @@ def parse_signal(text):
         "tp": targets[-1],
         "multi_target": "TP1" in values,
     }
+
+
+def parse_signals(text):
+    """One message may contain complete blocks separated by --- or blank lines."""
+    pieces = re.split(
+        r"\n\s*---+\s*\n|\n\s*\n(?=[A-Za-z0-9][A-Za-z0-9._-]{0,31}\s+(?:BUY|SELL)\b)",
+        text.strip(),
+        flags=re.I,
+    )
+    if len(pieces) > 20:
+        raise ValueError("At most 20 signals per message")
+    return [parse_signal(piece) for piece in pieces]

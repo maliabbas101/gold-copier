@@ -36,7 +36,7 @@ def main():
         + json.dumps(sample["dashboard"])
         + '; throw Error("Sign in through the running API to continue."); }'
     )
-    app = app[:start] + adapter + app[end:]
+    app = "if(!location.hash)location.hash='demo';\n" + app[:start] + adapter + app[end:]
     import base64
 
     mark = (

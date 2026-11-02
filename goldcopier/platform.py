@@ -141,6 +141,7 @@ def create_app():
             "billing_ready": bool(
                 paid and billing.key and billing.secret and all(billing.prices.values())
             ),
+            "master_worker_available": bool(os.environ.get("MASTER_TERMINAL_PATH")),
             "managed_available": bool(os.environ.get("SUPERVISOR_TOKEN")),
             "reset_available": bool(os.environ.get("SMTP_HOST")),
             "local_worker_available": bool(
@@ -350,6 +351,8 @@ def create_app():
 
     @app.post("/api/accounts/exness")
     def add_exness(body: M.ExnessAccountInput, current=Depends(user)):
+        if body.purpose == "master" and current["role"] != "admin":
+            raise HTTPException(403, "Only the operator can connect a trader source")
         if demo:
             raise ValueError("Demo workspaces cannot collect Exness credentials")
         from .exness_api import host, signing_key
@@ -365,6 +368,7 @@ def create_app():
                 "server": "Exness API",
                 "symbol": "XAUUSD",
                 "mode": "live",
+                "purpose": body.purpose,
                 "hosting": "api",
                 "password": json.dumps(
                     {
@@ -380,11 +384,13 @@ def create_app():
             db.execute(
                 "UPDATE accounts SET connector='exness' WHERE id=?", (account_id,)
             )
-        return {"id": account_id, "read_only": not live}
+        return {"id": account_id, "read_only": body.purpose == "master" or not live}
 
     @app.post("/api/accounts")
     def add_account(body: M.AccountInput, current=Depends(user)):
-        if body.mode == "live" and not live:
+        if body.purpose == "master" and current["role"] != "admin":
+            raise HTTPException(403, "Only the operator can connect a trader source")
+        if body.mode == "live" and not live and body.purpose != "master":
             raise ValueError("Live accounts are disabled for this installation")
         if body.hosting == "managed" and not os.environ.get("SUPERVISOR_TOKEN"):
             raise ValueError("Managed hosting is not configured")
@@ -503,9 +509,20 @@ def create_app():
 
     @app.get("/api/worker/config")
     def worker_config(a=Depends(agent)):
-        if a["mode"] == "live" and not live and a.get("connector") != "exness":
+        if (
+            a["mode"] == "live"
+            and not live
+            and a.get("connector") != "exness"
+            and a.get("purpose") != "master"
+        ):
             raise ValueError("Live execution disabled")
+        from .source_platform import source_config
+
+        with store.db() as db:
+            source = source_config(db, a["id"])
         return {
+            "purpose": a.get("purpose", "follower"),
+            "master_source": source,
             "account_id": a["id"],
             "hosting": a["hosting"],
             "connector": a.get("connector", "mt5"),
@@ -522,9 +539,55 @@ def create_app():
             "password": vault.decrypt(a["secret"], a["id"])
             if a["hosting"] == "managed" and a["secret"]
             else None,
-            "allow_live": live,
+            "allow_live": live and a.get("purpose") != "master",
             "demo_workspace": demo,
         }
+
+    @app.post("/api/worker/master-events")
+    def master_events(body: M.Ingest, a=Depends(agent)):
+        from .source_platform import source_config
+
+        with store.db() as db:
+            source = source_config(db, a["id"])
+        if (
+            demo
+            or a.get("purpose") != "master"
+            or not source
+            or not source["enabled"]
+            or not source["active"]
+            or source["analyst_id"] != body.analyst_id
+        ):
+            raise HTTPException(
+                403, "This worker has no active trader source for that analyst"
+            )
+        return store.ingest(
+            body.analyst_id,
+            body.source_id,
+            body.text,
+            body.created,
+            billing=paid,
+            origin="broker",
+        )
+
+    @app.get("/api/worker/master-events/{source_id}")
+    def master_receipt(source_id: str, a=Depends(agent)):
+        from .source_platform import source_config
+
+        with store.db() as db:
+            source = source_config(db, a["id"])
+            if a.get("purpose") != "master" or not source:
+                raise HTTPException(403, "Trader source worker required")
+            processed = db.execute(
+                "SELECT 1 FROM signal_messages WHERE analyst_id=? AND source_id=?",
+                (source["analyst_id"], source_id),
+            ).fetchone()
+        return {"processed": bool(processed)}
+
+    @app.post("/api/operator/master-sources")
+    def set_master_source(body: M.SourceBinding, current=Depends(admin)):
+        from .source_platform import configure_source
+
+        return configure_source(store, current["id"], body.model_dump())
 
     @app.post("/api/worker/heartbeat")
     def heartbeat(body: M.Snapshot, a=Depends(agent)):
@@ -533,7 +596,7 @@ def create_app():
 
     @app.post("/api/worker/claim")
     def claim(a=Depends(agent)):
-        if demo:
+        if demo or a.get("purpose") == "master":
             return None
         if a["mode"] == "live" and not live:
             return None
@@ -618,7 +681,24 @@ def create_app():
                 for r in db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")
             ]
             analysts = [dict(r) for r in db.execute("SELECT * FROM analysts")]
+            sources = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT s.*,a.name account_name,a.heartbeat,a.disconnected,json_extract(a.snapshot,'$.source_status') source_status FROM master_sources s JOIN accounts a ON a.id=s.account_id"
+                )
+            ]
+            logs = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT id,analyst_id,state,attempts,last_error,created,sent FROM discord_outbox ORDER BY created DESC LIMIT 30"
+                )
+            ]
+        for account in accounts:
+            account["owned"] = account["user_id"] == current["id"]
         return {
+            "sources": sources,
+            "discord_logs": logs,
+            "discord_logging_configured": bool(os.environ.get("DISCORD_BOT_TOKEN")),
             "accounts": accounts,
             "unresolved": unresolved,
             "events": events,

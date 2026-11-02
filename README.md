@@ -1,9 +1,52 @@
 # Gold Copier
 
-Copy an authorized analyst's Discord gold signals to your MT5 account.
-**Fill three Discord lines in `.env`, start the server, and click Start copying.**
-The server finds MT5, registers your account and runs the Discord listener and
-MT5 worker for you.
+Trade once on a trader's MT5 or eligible Exness API account. The copier sends protected new fills directly to followers and posts Discord logs separately. **You do not enter each trade in Discord and then in the operator console.**
+
+## Recommended setup: broker → copier → followers
+
+1. **Install** using the Windows instructions below for MT5. Start `python -m goldcopier.manage run`, then sign in to the local frontend. The direct Exness API worker can run without Windows/MT5. Source and follower accounts must be separate.
+2. In **Accounts**, connect the trader's account and choose **Trader source — read-only observation**. An operator may also convert their own paused follower account through source setup if it has no copier-owned exposure or unresolved work. Use the master terminal's saved login or a read-only/investor password where possible. Eligible direct Exness source keys should have read-only scopes.
+3. In **Operator console → Add analyst feed**, choose **Direct broker copying**, give it a name, and save. Existing feeds can also be reused. Then click **Configure trader source**, select the trader account and this analyst, and confirm. Enter a Discord **log channel ID** if you want outbound logs. Discord author/guild IDs are unnecessary for direct execution.
+4. Connect each **follower** account, follow that analyst, configure its broker symbols and risk limits, wait for Ready, then click **Start copying**. The trader source is read-only and cannot follow itself. Map symbols on the source account too; its mappings translate actual broker symbols into the community's canonical pairs.
+5. Keep the trader watcher and follower workers running. **Place a new trade with an SL on the trader terminal.** The watcher detects the fill, the server queues follower market entries, and workers execute within each follower's limits. No signal-console form is involved. The initial source snapshot is baselined: existing positions are not copied just because you connected or restarted.
+
+If both MT5 accounts are on one Windows computer, use two separate terminal installations and saved broker logins:
+
+```dotenv
+MT5_TERMINAL_PATH=C:\MT5-Follower\terminal64.exe
+MASTER_TERMINAL_PATH=C:\MT5-Trader\terminal64.exe
+# Optional if there is more than one account per role:
+LOCAL_ACCOUNT_ID=your-follower-account-id
+MASTER_ACCOUNT_ID=your-trader-account-id
+# Optional if the trader terminal does not have a saved login:
+MASTER_PASSWORD=your-trader-read-only-password
+```
+
+Restart `manage run` after changing terminal paths. It starts a separate worker per role. With one local trader account and remote follower workers, the single local terminal can observe the trader. For separately hosted workers, use **Accounts → Worker setup** and run `python -m goldcopier.platform_agent` with that account's own `AGENT_TOKEN`, `MT5_TERMINAL_PATH` (MT5 only), and a separate `WORKER_STATE` file. The account's server-side purpose determines read-only source versus follower behavior. A token cannot choose another analyst or account.
+
+### What is copied, and what is not
+
+New **filled** positions are copied; unfilled master pending orders are not cloned. When the master pending order fills, its new position is copied at follower CMP. Source detection polls about every 250 ms on MT5 and follows available Exness snapshots/events; follower queue polling is about one second. Network/broker calls add latency. This is not a zero-latency or tick-level guarantee; a position opened and fully closed between observations may not be mirrored.
+
+A source trade needs a mapped symbol and an SL. If the trader adds the SL shortly after opening, the watcher waits up to 60 seconds; it never invents protection or copies an expired trade. Later SL/TP changes, actual-fill breakeven, proportional partial reductions, and broker-confirmed full closes are propagated with stable references. Source volume increases/reversals in an existing position are blocked: use separate hedging positions for new entries. Removing source SL/TP does not remove follower protection. Missing positions alone never trigger a close; MT5 close history or Exness closed-position evidence is required. If confirmation is unavailable, the source status says it is waiting and follower SL/TP remain in place. A source-side netting/aggregation pattern is not equivalent to separate hedged trades.
+
+Each follower keeps its own sizing and exposure limits; the master lot amount is not copied blindly. Missed entries are not replayed when a follower later connects or enables copying. Pause/disable stops future source events; existing follower positions still need management. Read **Accounts → trader source status**, **Activity**, and **Trades & orders → Execution history** for precise waiting/skipped/rejected outcomes. A source event marked delivered is distinct from a broker-confirmed follower execution.
+
+### Discord is a log, not a dependency
+
+```dotenv
+DISCORD_BOT_TOKEN=your-existing-bot-token
+```
+
+Give the bot **View Channel / Send Messages** permission in the selected log channel. `manage run` starts the independent log sender. On separately deployed servers run `python -m goldcopier.discord_logs` beside the API using the same `PLATFORM_DB`. Source events and follower outcomes enter a durable outbox; rate limits, network failures, and bot restarts retry separately. Copying continues when Discord is unavailable. No `@everyone` ping or follower login/credential is published. Logs start with `[Gold Copier log]` and cannot be consumed as a new signal, preventing a copy loop. Long outages can produce repeated informational logs; they never produce duplicate trades.
+
+No Discord token or channel is required to **execute** the direct path. The operator console shows log configuration/backlog errors. Configure a log channel to release logs previously held without a destination.
+
+### If you only have Discord signals
+
+Discord-message copying remains an alternative: set the feed to **Read Discord messages**, configure exact guild/channel/author IDs, and let the listener ingest new posts automatically. **Do not paste the post into the operator console again.** The console's **Manual test (optional)** form is only for a new test, with an automatically generated unique reference. Direct broker feeds reject manual/Discord input.
+
+A duplicate notice means the same source ID was already consumed; it does not mean the trade executed. Find that source in Activity and Execution history instead of entering it twice. Follow the shared installation steps below, then choose the direct source setup above or the optional Discord-message configuration.
 
 ## 1. Install once
 
@@ -17,9 +60,9 @@ python -m venv .venv
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-## 2. Fill in `.env`
+## 2. Optional Discord-message configuration
 
-Only these three lines are required:
+For the **Discord-message path only**, configure these three lines. The recommended direct path does not need them for execution:
 
 ```dotenv
 DISCORD_BOT_TOKEN=your-discord-bot-token
@@ -32,7 +75,7 @@ The bot must be in your server, able to read the signal channel, and have
 posts the signals. With Discord Developer Mode on, right-click the channel or user
 and choose **Copy ID**.
 
-Everything else is detected or generated on first start:
+Shared local settings are detected or generated on first start:
 
 | Setting | Automatic value | Fill it in when |
 | --- | --- | --- |
@@ -65,7 +108,7 @@ password is saved. Open **[http://127.0.0.1:8001](http://127.0.0.1:8001/#login)*
    **Trades & orders** for its result and MT5 for the actual position.
 
 Starting copying does not immediately place a trade. It enables future valid
-signals from your selected analyst, subject to your risk settings and broker
+events from your selected direct broker source or Discord analyst, subject to your risk settings and broker
 checks. Old Discord messages are not replayed. Supported signal examples are in
 [the signal guide](docs/PLATFORM.md).
 
@@ -102,7 +145,7 @@ by default.
 
 ## Multi-instrument update and Exness API
 
-Open **Trading pairs** for canonical pair/alias CRUD and per-account broker mappings, with per-instrument spread, entry-distance, and lot limits. Multiple distinct signals, including identical-price signals with different message IDs, are queued independently. A single message may contain up to 20 complete signal blocks separated by `---`.
+Open **Trading pairs** for canonical pair/alias CRUD and per-account broker mappings, with per-instrument spread, entry-distance, and lot limits. Multiple distinct signals, including identical-price signals with different message IDs, are queued independently. A single message may contain up to 20 complete signal blocks separated by `---` or starting a new BUY/SELL header on the next line.
 
 **Accounts → Exness API** provisions the official signed direct connector for eligible Exness trading accounts. It is separate from MT5 and remains read-only with live execution disabled. See [docs/INSTRUMENTS_AND_EXNESS.md](docs/INSTRUMENTS_AND_EXNESS.md) for eligibility, configuration, confirmation semantics, acceptance limits, and migration instructions. No live API credentials were used to test this integration.
 
@@ -113,13 +156,13 @@ The alerts below use your trader's historical prices as **syntax examples**, not
 ### Execute now at CMP
 
 ```text
-BUY XAUUSD CMP 3900.7
+BUY XAUUSD CMP
 SL : 3894.7 (-60 pips)
 ```
 
-CMP means a market request on receipt, using the follower's current **Ask for BUY / Bid for SELL**. The printed CMP is a reference price, not a guaranteed fill. The account's pair-specific entry tolerance still applies; a stale/moved CMP is rejected rather than chased or converted to a pending order. `XAUUSD BUY CMP` or `XAUUSD BUY MARKET` with `ENTRY: 3900.7` is also accepted.
+CMP means a market request on receipt, using the follower's current **Ask for BUY / Bid for SELL**. **No number is required.** `BUY XAUUSD CMP`, `SELL XAUUSD CMP`, `XAUUSD BUY CMP`, or `XAUUSD BUY` with `ENTRY: CMP` use the follower's fresh broker quote. If you optionally include a number, it remains a reference price and entry tolerance applies. With no number there is no numeric entry-distance filter; stop/target validity, spread, sizing and exposure checks still apply. `XAUUSD BUY CMP` or `XAUUSD BUY MARKET` with `ENTRY: 3900.7` is also accepted.
 
-**SL is mandatory. TP and BE may arrive later.** With no TP, the position initially has only its broker-side SL; no target or automatic BE price is invented. Without a BE trigger the bot does not automatically move the stop, but a later explicit BE command is supported. In **Operator console → Signal preview & intake**, choose the **CMP — current market price** template, edit the prices, preview, then explicitly submit. Selecting a template does not trade.
+**SL is mandatory. TP and BE may arrive later.** With no TP, the position initially has only its broker-side SL; no target or automatic BE price is invented. Without a BE trigger the bot does not automatically move the stop, but a later explicit BE command is supported. For an optional manual test only, open **Operator console → Manual test**, choose the **CMP — current market price** template, set the SL/targets and explicitly submit. Selecting a template does not trade. The direct source and Discord listener do not require this step.
 
 ### Place a pending order
 

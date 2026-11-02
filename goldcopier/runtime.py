@@ -313,12 +313,12 @@ def bootstrap_account(store, terminal, analyst_id=None):
     if not terminal:
         return
     with store.db() as db:
-        existing = db.execute("SELECT id,user_id FROM accounts WHERE hosting='self'").fetchall()
+        existing = db.execute("SELECT id,user_id,purpose FROM accounts WHERE hosting='self'").fetchall()
     with store.db() as db:
         if db.execute("SELECT 1 FROM settings WHERE key='local_bootstrap_removed'").fetchone():
             return
     if existing:
-        if analyst_id and len(existing) == 1:
+        if analyst_id and len(existing) == 1 and existing[0]["purpose"] != "master":
             with store.db() as db:
                 followed = db.execute("SELECT 1 FROM follows WHERE account_id=? AND analyst_id=?",
                                       (existing[0]["id"], analyst_id)).fetchone()
@@ -394,8 +394,9 @@ def wait_for_server(child, base, runtime_id, timeout=30):
 class LocalWorker:
     """Bind one terminal to one self-hosted account; never restart failed jobs."""
 
-    def __init__(self, store, state, terminal):
+    def __init__(self, store, state, terminal, purpose=None):
         self.store, self.state, self.terminal = store, state, terminal
+        self.purpose = purpose
         self.child = None
         self.notice = None
         self.account_id = None
@@ -404,8 +405,8 @@ class LocalWorker:
     def tick(self):
         if self.child is not None:
             with self.store.db() as db:
-                row = db.execute("SELECT disconnected FROM accounts WHERE id=?", (self.account_id,)).fetchone()
-            if not row or row["disconnected"]:
+                row = db.execute("SELECT disconnected,purpose FROM accounts WHERE id=?", (self.account_id,)).fetchone()
+            if not row or row["disconnected"] or (self.purpose and row["purpose"] != self.purpose):
                 if not stop_child(self.child):
                     return
                 self.child = None
@@ -427,8 +428,8 @@ class LocalWorker:
                         self.store.event(db, row["user_id"], "alert", detail, self.account_id)
                 log.error("%s The app remains available; the worker was not automatically restarted.", detail)
             return
-        selected = os.environ.get("LOCAL_ACCOUNT_ID", "").strip()
-        supplied_token = os.environ.get("AGENT_TOKEN", "").strip()
+        selected = os.environ.get("MASTER_ACCOUNT_ID" if self.purpose=="master" else "LOCAL_ACCOUNT_ID", "").strip()
+        supplied_token = os.environ.get("MASTER_AGENT_TOKEN" if self.purpose=="master" else "AGENT_TOKEN", "").strip()
         if supplied_token:
             agent = self.store.agent(supplied_token)
             if not agent:
@@ -441,6 +442,8 @@ class LocalWorker:
                 rows = [dict(r) for r in db.execute("SELECT * FROM accounts WHERE hosting='self' AND disconnected=0 AND connector='mt5'")]
         if selected:
             rows = [r for r in rows if r["id"] == selected]
+        if self.purpose:
+            rows = [r for r in rows if r["purpose"]==self.purpose]
         reason = None
         if not rows:
             reason = "Add a Self-hosted MT5 account in the app; its worker will start automatically."
@@ -459,7 +462,7 @@ class LocalWorker:
             return
         directory = self.state / "workers" / account["id"]
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        ledger = Path(os.environ.get("WORKER_STATE") or directory / "worker.db").resolve()
+        ledger = Path(os.environ.get("MASTER_WORKER_STATE" if self.purpose=="master" else "WORKER_STATE") or directory / "worker.db").resolve()
         ledger.parent.mkdir(parents=True, exist_ok=True)
         if Path(str(ledger) + ".lock").exists() and not clear_stale_lock(str(ledger) + ".lock"):
             raise ValueError("Worker lock exists. Verify the old worker is stopped before removing its lock: " + str(ledger) + ".lock")
@@ -477,6 +480,8 @@ class LocalWorker:
             log.info("Local MT5 connection configured. Click Start copying in the app when the account is ready.")
         env = {**os.environ, "AGENT_TOKEN": token, "MT5_TERMINAL_PATH": self.terminal,
                "WORKER_STATE": str(ledger)}
+        if self.purpose=="master":
+            env["MT5_PASSWORD"] = os.environ.get("MASTER_PASSWORD", "")
         self.child = start_child("goldcopier.platform_agent", env=env)
         self.account_id = account["id"]
         log.info("Started local MT5 worker for account %s", account["id"])
@@ -487,6 +492,9 @@ def main(env_file=".env"):
     load_env(env_file)
     os.environ["COPIER_ENV_FILE"] = str(Path(env_file).resolve())
     store, state, base, port, terminal = configure()
+    master_terminal=os.environ.get("MASTER_TERMINAL_PATH", "").strip()
+    if master_terminal and (not Path(master_terminal).is_file() or (terminal and Path(master_terminal).resolve()==Path(terminal).resolve())):
+        raise ValueError("MASTER_TERMINAL_PATH must be a separate trader terminal64.exe from the follower terminal")
     lock = state / "runtime.lock"
     if lock.exists():
         clear_stale_lock(lock)
@@ -495,7 +503,10 @@ def main(env_file=".env"):
     except FileExistsError as exc:
         raise ValueError(f"Runner lock exists: {lock}. Verify the old runner is stopped before removing it.") from exc
     children = []
-    worker = LocalWorker(store, state, terminal) if terminal else None
+    optional_services = {}
+    optional_retry = {}
+    master_worker=LocalWorker(store,state,master_terminal,purpose="master") if master_terminal else None
+    worker = LocalWorker(store, state, terminal,purpose="follower" if master_worker else None) if terminal else None
     job = bind_children_to_runner()  # noqa: F841 - kept open until exit
     try:
         os.write(fd, str(os.getpid()).encode())
@@ -507,17 +518,35 @@ def main(env_file=".env"):
         wait_for_server(server, base, os.environ["LOCAL_RUNTIME_ID"])
         log.info("Open %s/#login - Ctrl+C stops the server, listener and local worker.", base)
         if os.environ.get("DISCORD_BOT_TOKEN", "").strip():
-            children.append(start_child("goldcopier.discord_platform"))
+            for module in ("goldcopier.discord_platform","goldcopier.discord_logs"):
+                child=start_child(module)
+                children.append(child)
+                optional_services[id(child)]=module
         else:
             log.info("DISCORD_BOT_TOKEN is empty; Discord listener is disabled.")
         if not worker:
             log.info("No MT5 terminal found; local worker is disabled. Set MT5_TERMINAL_PATH in .env.")
         while True:
-            for child in children:
+            for index,child in enumerate(list(children)):
                 if child.poll() is not None:
+                    module=optional_services.get(id(child))
+                    if module:
+                        if time.monotonic() >= optional_retry.get(module,0):
+                            optional_retry[module]=time.monotonic()+10
+                            log.warning("%s stopped; broker copying continues while Discord reconnects",module)
+                            try:
+                                replacement=start_child(module)
+                                children[index]=replacement
+                                optional_services.pop(id(child),None)
+                                optional_services[id(replacement)]=module
+                            except OSError:
+                                log.exception("Discord service restart failed; copier remains running")
+                        continue
                     raise ValueError("A service stopped unexpectedly. Fix its error above, then restart manage run.")
             if worker:
                 worker.tick()
+            if master_worker:
+                master_worker.tick()
             time.sleep(2)
     except KeyboardInterrupt:
         log.info("Stopping services, please wait (up to 20 seconds)...")
@@ -528,6 +557,8 @@ def main(env_file=".env"):
         stopped = True
         if worker and worker.child:
             stopped = stop_child(worker.child) and stopped
+        if master_worker and master_worker.child:
+            stopped = stop_child(master_worker.child) and stopped
         for child in reversed(children):
             stopped = stop_child(child) and stopped
         os.close(fd)

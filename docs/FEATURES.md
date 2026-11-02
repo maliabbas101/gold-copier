@@ -17,7 +17,7 @@ This implementation uses the public descriptions of Inspired Analyst Bot as a fu
 | Card subscriptions / cancellation portal | Stripe integration implemented; operator keys, products, portal and webhooks required |
 | Crypto payments | Not implemented |
 | Secure stored credentials | Server-side AES-256-GCM at-rest vault; no claim of client-side/end-to-end encryption |
-| Direct analyst MT5 mirroring | Read-only master-position bridge implemented; master pending orders/scale-ins excluded |
+| Direct trader copying | Scoped read-only MT5/eligible Exness source worker → follower queue; asynchronous Discord outbox; source pending orders and scale-ins excluded |
 | Pending follower entries | Explicit LIMIT/STOP and AUTO; CMP executes at current market within tolerance |
 | Hot standby / zero-downtime claims | Not implemented as an automatic trading failover mechanism; supervised recovery documented |
 | P&L and trade visibility | Snapshot equity chart, current positions/orders, today's closed deals, realized P&L, command history and CSV |
@@ -34,3 +34,5 @@ The multi-instrument / direct API update supersedes the original gold-only limit
 Trader APP templates, optional later TP/BE, half-risk split entries, referenced/reply updates and informational status messages are covered by [README examples](../README.md#trader-signal-formats-cmp-and-later-updates).
 
 Live portfolio: one-second authenticated browser stream with polling fallback, broker snapshot/current-price updates, a rolling live equity chart, account-specific history, stale-data indicators, and preservation of open dialogs/search. See [live portfolio setup](../README.md#live-portfolio-and-trade-updates).
+
+CMP supports no-price `BUY XAUUSD CMP` and `ENTRY: CMP`. Operator console signal entry is an optional manual-test path; it is not required after a Discord post or broker fill.

@@ -95,11 +95,13 @@ def parse_signal(text):
     else:
         base = {"signal_id": update[1].lower()} if update else {}
     # Trader variant: BUY SYMBOL CMP price, or PLACE SYMBOL BUY LIMIT.
-    cmp_head = re.fullmatch(rf"(BUY|SELL)\s+({SYM})\s+CMP\s*:?[ ]*({NUM})", lines[0])
+    cmp_head = re.fullmatch(
+        rf"(BUY|SELL)\s+({SYM})\s+CMP(?:\s*:?[ ]*({NUM}))?", lines[0]
+    )
     if cmp_head:
         lines = [
             f"{cmp_head[2]} {cmp_head[1]} CMP",
-            f"ENTRY: {cmp_head[3]}",
+            f"ENTRY: {cmp_head[3] or 'CMP'}",
             *lines[1:],
         ]
     else:
@@ -116,6 +118,11 @@ def parse_signal(text):
     values = {}
     factor = 1.0
     for line in lines[1:]:
+        if re.fullmatch(r"ENTRY\s*:\s*CMP", line):
+            if "ENTRY" in values or update:
+                raise ValueError("Invalid or duplicate ENTRY")
+            values["ENTRY"] = None
+            continue
         if line == "HALF RISK (0.5R)":
             if factor != 1 or update:
                 raise ValueError("Invalid risk instruction")
@@ -151,6 +158,8 @@ def parse_signal(text):
                 else {}
             ),
         }
+    if head[3] in ("CMP", "MARKET") and "ENTRY" not in values:
+        values["ENTRY"] = None
     if not {"ENTRY", "SL"} <= set(values):
         raise ValueError("ENTRY (or CMP price) and SL required")
     entry = values["ENTRY"]
@@ -158,6 +167,11 @@ def parse_signal(text):
     if isinstance(entry, list) and low == high:
         raise ValueError("Entry prices must differ")
     kind = head[3] or "AUTO"
+    if entry is None:
+        if kind in ("LIMIT", "STOP"):
+            raise ValueError("Pending orders require an entry price")
+        kind = "CMP"
+
     if kind in ("LIMIT", "STOP") and isinstance(entry, list) and not values.get("LEGS"):
         raise ValueError(
             "Pending orders require exact entries; use | for separate legs"
@@ -166,13 +180,14 @@ def parse_signal(text):
         raise ValueError("Separate legs require explicit LIMIT or STOP")
     sl, be = values["SL"], values.get("BE")
     buy = head[2] == "BUY"
-    if (buy and sl >= low) or (not buy and sl <= high):
+    if entry is not None and ((buy and sl >= low) or (not buy and sl <= high)):
         raise ValueError("Invalid SL/entry order")
-    if targets and ((buy and targets[0] <= high) or (not buy and targets[0] >= low)):
+    edge = (high if buy else low) if entry is not None else sl
+    if targets and ((buy and targets[0] <= edge) or (not buy and targets[0] >= edge)):
         raise ValueError("Invalid target order")
     if be and (
-        (buy and (be <= high or (targets and be > targets[0])))
-        or (not buy and (be >= low or (targets and be < targets[0])))
+        (buy and (be <= edge or (targets and be > targets[0])))
+        or (not buy and (be >= edge or (targets and be < targets[0])))
     ):
         raise ValueError("Invalid BE order")
     if len(targets) > 1 and (
@@ -185,7 +200,7 @@ def parse_signal(text):
         "side": head[2],
         "order_type": "MARKET" if kind == "CMP" else kind,
         "execution_mode": kind,
-        "entry": (low + high) / 2,
+        "entry": (low + high) / 2 if entry is not None else None,
         "entry_low": low,
         "entry_high": high,
         "sl": sl,
@@ -200,12 +215,14 @@ def parse_signal(text):
 
 def parse_signals(text):
     pieces = re.split(
-        r"\n\s*---+\s*\n|\n\s*\n(?=(?:PLACE\s+)?[A-Za-z0-9][A-Za-z0-9._-]{0,31}\s+(?:BUY|SELL)\b|(?:BUY|SELL)\s+[A-Za-z0-9._-]+\s+CMP\b)",
+        r"\n\s*---+\s*\n|\n(?=\s*(?:(?:PLACE\s+)?[A-Za-z0-9][A-Za-z0-9._-]{0,31}\s+(?:BUY|SELL)\b|(?:BUY|SELL)\s+[A-Za-z0-9._-]+\s+CMP\b))",
         text.strip(),
         flags=re.I,
     )
     signals = []
     for piece in pieces:
+        if not piece.strip():
+            continue
         item = parse_signal(piece)
         legs = item.pop("entry_legs", None)
         if legs:
@@ -221,6 +238,8 @@ def parse_signals(text):
             )
         else:
             signals.append(item)
+    if not signals:
+        raise ValueError("Empty signal")
     if len(signals) > 20:
         raise ValueError("At most 20 signals per message")
     return signals

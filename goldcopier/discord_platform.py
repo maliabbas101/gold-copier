@@ -9,6 +9,8 @@ from .platform_store import PlatformStore
 
 
 def feeds(store, message, listener_id=None):
+    if (message.content or "").startswith("[Gold Copier log]"):
+        return []
     if (
         not message.guild
         or (message.webhook_id is not None and message.webhook_id != message.author.id)
@@ -19,7 +21,7 @@ def feeds(store, message, listener_id=None):
         return [
             dict(r)
             for r in db.execute(
-                "SELECT * FROM analysts WHERE guild_id=? AND channel_id=? AND trader_id=? AND active=1",
+                "SELECT * FROM analysts WHERE guild_id=? AND channel_id=? AND trader_id=? AND active=1 AND source_mode='discord'",
                 (
                     str(message.guild.id),
                     str(message.channel.id),

@@ -22,7 +22,7 @@ def settings(tmp_path, monkeypatch):
         "BILLING_ENABLED", "AGENT_TOKEN", "WORKER_STATE", "COPIER_ENV_FILE",
         "ADMIN_EMAIL", "ADMIN_PASSWORD", "ADMIN_NAME", "MT5_PASSWORD",
         "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID", "DISCORD_TRADER_ID", "ANALYST_NAME",
-        "MT5_LOGIN", "MT5_SERVER", "MT5_SYMBOL",
+        "MT5_LOGIN", "MT5_SERVER", "MT5_SYMBOL", "MASTER_TERMINAL_PATH", "MASTER_ACCOUNT_ID", "MASTER_AGENT_TOKEN", "MASTER_WORKER_STATE", "MASTER_PASSWORD",
     ):
         monkeypatch.delenv(name, raising=False)
     # Terminal auto-detection must never find an MT5 installed on the test machine.
@@ -282,9 +282,10 @@ def test_failed_worker_is_not_restarted(settings, monkeypatch):
 def test_runner_failure_stops_every_started_service(settings, monkeypatch):
     store, state, base, port, terminal = runtime.configure()
     store.signup("Owner", "owner@example.com", "long-test-password", "admin")
-    server = Obj(poll=lambda: None)
-    listener = Obj(poll=lambda: 1)
-    children = iter([server, listener])
+    server = Obj(poll=lambda: 1)
+    listener = Obj(poll=lambda: None)
+    logger = Obj(poll=lambda: None)
+    children = iter([server, listener, logger])
     stopped = []
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
     monkeypatch.setattr(runtime, "configure", lambda: (store, state, base, port, terminal))
@@ -295,7 +296,7 @@ def test_runner_failure_stops_every_started_service(settings, monkeypatch):
     monkeypatch.setattr(runtime, "bind_children_to_runner", lambda: None)
     with pytest.raises(ValueError, match="service stopped unexpectedly"):
         runtime.main()
-    assert stopped == [listener, server]
+    assert stopped == [logger, listener, server]
     assert not (state / "runtime.lock").exists()
 
 
@@ -605,3 +606,36 @@ def test_disconnected_local_worker_stops_and_is_not_automatically_reprovisioned(
     assert stopped == [child]
     assert worker.child is None
     assert store.agent(token) is None
+
+
+def test_separate_source_and_follower_workers_choose_accounts_by_purpose(settings,monkeypatch):
+    store,state,*_=runtime.configure()
+    owner,follower=account(store)
+    _,source=account(store,login='456',purpose='master')
+    calls=[]
+    monkeypatch.setattr(runtime,'start_child',lambda *args,**kw:calls.append(kw) or Obj(poll=lambda:None))
+    follower_worker=runtime.LocalWorker(store,state,'follower.exe',purpose='follower')
+    source_worker=runtime.LocalWorker(store,state,'source.exe',purpose='master')
+    follower_worker.tick();source_worker.tick()
+    assert store.agent(calls[0]['env']['AGENT_TOKEN'])['id']==follower
+    assert store.agent(calls[1]['env']['AGENT_TOKEN'])['id']==source
+    assert calls[0]['env']['WORKER_STATE']!=calls[1]['env']['WORKER_STATE']
+    assert calls[1]['env']['MT5_TERMINAL_PATH']=='source.exe'
+
+
+def test_discord_process_failure_does_not_stop_the_broker_services(settings,monkeypatch):
+    store,state,base,port,terminal=runtime.configure()
+    store.signup('Owner','owner@example.com','long-test-password','admin')
+    server=Obj(poll=lambda:None);listener=Obj(poll=lambda:1);logs=Obj(poll=lambda:None);replacement=Obj(poll=lambda:None)
+    children=iter([server,listener,logs,replacement]);stopped=[]
+    monkeypatch.setenv('DISCORD_BOT_TOKEN','test-token')
+    monkeypatch.setattr(runtime,'configure',lambda:(store,state,base,port,terminal))
+    monkeypatch.setattr(runtime,'load_env',lambda _:None)
+    monkeypatch.setattr(runtime,'start_child',lambda *a,**kw:next(children))
+    monkeypatch.setattr(runtime,'wait_for_server',lambda *a:None)
+    monkeypatch.setattr(runtime,'bind_children_to_runner',lambda:None)
+    monkeypatch.setattr(runtime,'stop_child',lambda child:stopped.append(child) or True)
+    def end_after_successful_loop(_):raise KeyboardInterrupt
+    monkeypatch.setattr(runtime.time,'sleep',end_after_successful_loop)
+    runtime.main()
+    assert stopped==[logs,replacement,server]

@@ -71,6 +71,11 @@ class PlatformBroker(MT5Broker):
         actual = "demo" if a.trade_mode == self.mt.ACCOUNT_TRADE_MODE_DEMO else "live"
         if actual != expected:
             raise ValueError("Account trade mode does not match registration")
+        if self.cfg.get("purpose") == "master":
+            terminal = self.mt.terminal_info()
+            if terminal is None or not terminal.connected:
+                raise ValueError("Trader source terminal is not connected")
+            return a
         if actual == "live" and not self.cfg.get("allow_live", False):
             raise ValueError(
                 "Live execution requires both operator and local worker enablement"
@@ -113,6 +118,8 @@ class PlatformBroker(MT5Broker):
         return used
 
     def prepare_entry(self, signal, risk, job_id):
+        if self.cfg.get("purpose") == "master":
+            raise ValueError("Trader source workers are read-only")
         risk = Risk(**risk).model_dump()
         a = self.check_account()
         symbol = self.entry_symbol(signal)
@@ -149,6 +156,7 @@ class PlatformBroker(MT5Broker):
             )
         if (
             not pending
+            and signal.get("entry_low") is not None
             and not signal["entry_low"] - risk["max_entry_distance"]
             <= price
             <= signal["entry_high"] + risk["max_entry_distance"]
@@ -307,6 +315,8 @@ class PlatformBroker(MT5Broker):
             )
 
     def submit(self, request):
+        if self.cfg.get("purpose") == "master":
+            raise ValueError("Trader source workers are read-only")
         result = self.mt.order_send(request)
         accepted = {self.mt.TRADE_RETCODE_DONE}
         if request["action"] == self.mt.TRADE_ACTION_PENDING:
@@ -373,6 +383,8 @@ class PlatformBroker(MT5Broker):
         return matched
 
     def prepare_control(self, command):
+        if self.cfg.get("purpose") == "master":
+            raise ValueError("Trader source workers are read-only")
         self.check_account()
         requests = []
         positions = self.mt.positions_get()

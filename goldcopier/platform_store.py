@@ -148,6 +148,9 @@ class PlatformStore:
     def add_account(self, user, data, vault):
         account_id = uid()
         analyst_id = data.pop("analyst_id", None)
+        purpose = data.get("purpose", "follower")
+        if purpose == "master":
+            analyst_id = None
         password = data.pop("password")
         if data["hosting"] == "self":
             password = ""
@@ -178,6 +181,9 @@ class PlatformStore:
                     dump(Risk().model_dump()),
                     time.time(),
                 ),
+            )
+            db.execute(
+                "UPDATE accounts SET purpose=? WHERE id=?", (purpose, account_id)
             )
             pair = (
                 "XAUUSD"
@@ -247,6 +253,9 @@ class PlatformStore:
                     "DELETE FROM account_pairs WHERE account_id=?", (account_id,)
                 )
                 db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+                db.execute(
+                    "DELETE FROM master_sources WHERE account_id=?", (account_id,)
+                )
                 if a["hosting"] == "self":
                     db.execute(
                         "INSERT OR REPLACE INTO settings VALUES('local_bootstrap_removed','true')"
@@ -291,6 +300,10 @@ class PlatformStore:
         with self.db() as db:
             a = self.account(user, account_id, db)
             if enabled:
+                if a.get("purpose") == "master":
+                    raise ValueError(
+                        "Trader source accounts are read-only and cannot follow signals"
+                    )
                 if a["disconnected"]:
                     raise ValueError("Reconnect this account before starting copying")
                 if a["mode"] == "live" and not allow_live:
@@ -358,6 +371,8 @@ class PlatformStore:
     def follow(self, user, account_id, analyst_id, enabled):
         with self.db() as db:
             a = self.account(user, account_id, db)
+            if enabled and a.get("purpose") == "master":
+                raise ValueError("A trader source cannot follow or copy its own trades")
             analyst = db.execute(
                 "SELECT * FROM analysts WHERE id=? AND active=1", (analyst_id,)
             ).fetchone()
@@ -404,7 +419,7 @@ class PlatformStore:
         ident = uid()
         with self.db() as db:
             db.execute(
-                "INSERT INTO analysts VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO analysts(id,name,description,guild_id,channel_id,trader_id,active) VALUES(?,?,?,?,?,?,?)",
                 (
                     ident,
                     data["name"],
@@ -414,6 +429,10 @@ class PlatformStore:
                     data["trader_id"],
                     int(data["active"]),
                 ),
+            )
+            db.execute(
+                "UPDATE analysts SET source_mode=? WHERE id=?",
+                (data.get("source_mode", "discord"), ident),
             )
             self.event(db, None, "admin", "Analyst added: " + data["name"])
         return ident
@@ -427,6 +446,7 @@ class PlatformStore:
         ttl=60,
         billing=False,
         reference_id=None,
+        origin="discord",
     ):
         from .instruments import canonical
 
@@ -437,12 +457,9 @@ class PlatformStore:
             raise ValueError("Batch source reference is too long")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            if (
-                db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[
-                    0
-                ]
-                == "true"
-            ):
+            if db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[
+                0
+            ] == "true" and any(item["action"] == "entry" for item in parsed):
                 raise ValueError("Platform paused")
             if not db.execute(
                 "SELECT 1 FROM analysts WHERE id=? AND active=1", (analyst_id,)
@@ -459,6 +476,23 @@ class PlatformStore:
                 ).fetchone()
             ):
                 return {"duplicate": True, "queued": 0, "ids": [], "skipped": []}
+            analyst = db.execute(
+                "SELECT source_mode FROM analysts WHERE id=?", (analyst_id,)
+            ).fetchone()
+            if analyst["source_mode"] == "broker" and origin != "broker":
+                raise ValueError(
+                    "This feed copies the trader account directly. Do not submit Discord/manual signals to it."
+                )
+            if origin == "broker" and analyst["source_mode"] != "broker":
+                raise ValueError("Direct broker source is not enabled")
+            if (
+                origin == "broker"
+                and not db.execute(
+                    "SELECT 1 FROM master_sources s JOIN accounts a ON a.id=s.account_id WHERE s.analyst_id=? AND s.enabled=1 AND a.disconnected=0 AND a.purpose='master'",
+                    (analyst_id,),
+                ).fetchone()
+            ):
+                raise ValueError("Trader source is paused, disconnected, or unbound")
             payloads = []
             for item in parsed:
                 payload = {**item, "origin": "analyst"}
@@ -511,7 +545,11 @@ class PlatformStore:
                     if update.get("targets"):
                         targets = update["targets"]
                         buy = original["side"] == "BUY"
-                        edge = original["entry_high"] if buy else original["entry_low"]
+                        edge = (
+                            original.get("entry_high")
+                            if buy
+                            else original.get("entry_low")
+                        ) or original["sl"]
                         if (
                             (buy and targets[0] <= edge)
                             or (not buy and targets[0] >= edge)
@@ -547,7 +585,7 @@ class PlatformStore:
                 (analyst_id, source_id, created),
             )
             rows = db.execute(
-                "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=? AND a.disconnected=0",
+                "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=? AND a.disconnected=0 AND a.purpose='follower'",
                 (analyst_id,),
             ).fetchall()
             queued = 0
@@ -688,6 +726,16 @@ class PlatformStore:
                         a["id"],
                     )
                     queued += 1
+            if origin == "broker":
+                from .source_platform import enqueue_log
+
+                enqueue_log(
+                    db,
+                    analyst_id,
+                    "source:" + analyst_id + ":" + source_id,
+                    text
+                    + f"\nFollower commands queued: {queued}; skipped: {len(skipped)}\nSource: {source_id}\nLog only; do not resubmit this message.",
+                )
             return {
                 "id": ids[0],
                 "ids": ids,
@@ -699,6 +747,10 @@ class PlatformStore:
     def control(self, user, account_id, payload):
         with self.db() as db:
             a = self.account(user, account_id, db)
+            if a.get("purpose") == "master":
+                raise ValueError(
+                    "Trader source is read-only; trade on the trader terminal"
+                )
             if a["disconnected"]:
                 raise ValueError(
                     "Account is disconnected; manage trades directly with your broker"
@@ -735,7 +787,8 @@ class PlatformStore:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute(
-                "SELECT agent_hash,disconnected FROM accounts WHERE id=?", (a["id"],)
+                "SELECT agent_hash,disconnected,snapshot,purpose FROM accounts WHERE id=?",
+                (a["id"],),
             ).fetchone()
             if (
                 not current
@@ -747,6 +800,15 @@ class PlatformStore:
                 "UPDATE accounts SET snapshot=?,heartbeat=? WHERE id=?",
                 (dump(snapshot), time.time(), a["id"]),
             )
+            if (
+                current["purpose"] == "master"
+                and snapshot.get("source_status")
+                and snapshot["source_status"]
+                != json.loads(current["snapshot"] or "{}").get("source_status")
+            ):
+                self.event(
+                    db, a["user_id"], "source", snapshot["source_status"], a["id"]
+                )
             last = db.execute(
                 "SELECT MAX(created) FROM equity WHERE account_id=?", (a["id"],)
             ).fetchone()[0]
@@ -787,6 +849,7 @@ class PlatformStore:
                 not current
                 or current["disconnected"]
                 or current["agent_hash"] != a["agent_hash"]
+                or current["purpose"] == "master"
             ):
                 return None
             db.execute(
@@ -859,6 +922,19 @@ class PlatformStore:
                 (result["state"], encoded, job_id),
             )
             self.event(db, a["user_id"], "execution", result["detail"], a["id"])
+            from .source_platform import enqueue_log
+
+            source_feed = db.execute(
+                "SELECT f.analyst_id,f.source_id FROM feeds f JOIN analysts n ON n.id=f.analyst_id WHERE f.id=? AND n.source_mode='broker'",
+                (row["feed_id"],),
+            ).fetchone()
+            if source_feed:
+                enqueue_log(
+                    db,
+                    source_feed[0],
+                    "result:" + job_id + ":" + result["state"],
+                    f"Follower job {job_id[:10]}: {result['state']}\n{result['detail']}\nSource: {source_feed['source_id']}",
+                )
             if result["state"] == "uncertain":
                 db.execute("UPDATE accounts SET enabled=0 WHERE id=?", (a["id"],))
 
@@ -920,6 +996,11 @@ class PlatformStore:
                     and time.time() - a["heartbeat"] < 30
                 )
                 a["credential_stored"] = bool(row["secret"])
+                source = db.execute(
+                    "SELECT s.*,n.name analyst_name FROM master_sources s JOIN analysts n ON n.id=s.analyst_id WHERE s.account_id=?",
+                    (a["id"],),
+                ).fetchone()
+                a["master_source"] = dict(source) if source else None
                 a["pairs"] = [
                     dict(m)
                     for m in db.execute(
@@ -937,12 +1018,14 @@ class PlatformStore:
                 accounts.append(a)
             analysts = [
                 dict(r)
-                for r in db.execute("SELECT id,name,description,active FROM analysts")
+                for r in db.execute(
+                    "SELECT id,name,description,active,source_mode FROM analysts"
+                )
             ]
             jobs = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT j.* FROM pjobs j JOIN accounts a ON a.id=j.account_id WHERE a.user_id=? ORDER BY j.created DESC LIMIT 200",
+                    "SELECT j.*,f.source_id source_ref FROM pjobs j JOIN accounts a ON a.id=j.account_id LEFT JOIN feeds f ON f.id=j.feed_id WHERE a.user_id=? ORDER BY j.created DESC LIMIT 200",
                     (user,),
                 )
             ]

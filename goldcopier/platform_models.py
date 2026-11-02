@@ -27,6 +27,7 @@ class AccountInput(Model):
     symbol: str = Field(default="XAUUSD", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
     mode: Literal["demo", "live"] = "demo"
     hosting: Literal["self", "managed"] = "self"
+    purpose: Literal["follower", "master"] = "follower"
     analyst_id: str | None = Field(default=None, min_length=1, max_length=64)
     password: str = Field(default="", max_length=128)
     consent: Literal[True]
@@ -69,10 +70,19 @@ class AccountRemoval(Model):
 class Analyst(Model):
     name: str = Field(min_length=2, max_length=60)
     description: str = Field(default="", max_length=300)
-    guild_id: str = Field(pattern=r"^\d{1,24}$")
-    channel_id: str = Field(pattern=r"^\d{1,24}$")
-    trader_id: str = Field(pattern=r"^\d{1,24}$")
+    source_mode: Literal["discord", "broker"] = "discord"
+    guild_id: str = Field(default="", pattern=r"^(?:\d{1,24})?$")
+    channel_id: str = Field(default="", pattern=r"^(?:\d{1,24})?$")
+    trader_id: str = Field(default="", pattern=r"^(?:\d{1,24})?$")
     active: bool = True
+
+    @model_validator(mode="after")
+    def discord_ids(self):
+        if self.source_mode == "discord" and not all(
+            (self.guild_id, self.channel_id, self.trader_id)
+        ):
+            raise ValueError("Discord mode needs exact guild, channel, and author IDs")
+        return self
 
 
 class Control(Model):
@@ -105,6 +115,7 @@ class Snapshot(Model):
     orders: list[dict] = Field(default_factory=list, max_length=100)
     deals: list[dict] = Field(default_factory=list, max_length=100)
     instruments: list[str] = Field(default_factory=list, max_length=1000)
+    source_status: str | None = Field(default=None, max_length=300)
     daily_pnl: float = 0
     error: str | None = Field(default=None, max_length=300)
 
@@ -150,7 +161,16 @@ class AutoResult(Model):
     result: JobResult
 
 
+class SourceBinding(Model):
+    account_id: str = Field(min_length=1, max_length=64)
+    analyst_id: str = Field(min_length=1, max_length=64)
+    enabled: bool = True
+    confirm_read_only: Literal[True]
+    log_channel_id: str | None = Field(default=None, pattern=r"^(?:\d{1,24})?$")
+
+
 class ExnessAccountInput(Model):
+    purpose: Literal["follower", "master"] = "follower"
     name: str = Field(min_length=2, max_length=60)
     account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     api_key: str = Field(min_length=8, max_length=256)

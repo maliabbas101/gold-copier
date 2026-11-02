@@ -53,6 +53,18 @@ def migrate(db):
     db.execute(
         "CREATE TABLE IF NOT EXISTS signal_threads(analyst_id TEXT NOT NULL,source_id TEXT NOT NULL,symbol TEXT NOT NULL,closed INTEGER NOT NULL DEFAULT 0,created REAL NOT NULL,PRIMARY KEY(analyst_id,source_id,symbol))"
     )
+    for table, column, definition in (
+        ("accounts", "purpose", "TEXT NOT NULL DEFAULT 'follower'"),
+        ("analysts", "source_mode", "TEXT NOT NULL DEFAULT 'discord'"),
+    ):
+        if column not in [r[1] for r in db.execute(f"PRAGMA table_info({table})")]:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS master_sources(id TEXT PRIMARY KEY,analyst_id TEXT UNIQUE NOT NULL,account_id TEXT UNIQUE NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS discord_outbox(id TEXT PRIMARY KEY,analyst_id TEXT NOT NULL,channel_id TEXT NOT NULL,content TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt REAL NOT NULL DEFAULT 0,last_error TEXT,created REAL NOT NULL,sent REAL)"
+    )
     if "disconnected" not in [r[1] for r in db.execute("PRAGMA table_info(accounts)")]:
         db.execute(
             "ALTER TABLE accounts ADD COLUMN disconnected INTEGER NOT NULL DEFAULT 0"

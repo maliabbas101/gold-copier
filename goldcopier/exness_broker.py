@@ -78,6 +78,8 @@ class ExnessBroker(PlatformBroker):
         return super().prepare_control(command)
 
     def submit(self, request):
+        if self.cfg.get("purpose") == "master":
+            raise ValueError("Trader source workers are read-only")
         result = self.mt.order_send(request)
         if result.retcode == -1:
             return {

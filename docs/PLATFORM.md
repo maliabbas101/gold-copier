@@ -1,3 +1,5 @@
+> Recommended automatic flow: [broker → copier → followers, with optional Discord logs](../README.md#recommended-setup-broker--copier--followers). No console signal entry is required.
+
 > Multi-instrument update: the original gold-only signal descriptions below are superseded by [INSTRUMENTS_AND_EXNESS.md](INSTRUMENTS_AND_EXNESS.md). The existing local runtime workflow is retained.
 
 # Platform setup and operations
@@ -9,7 +11,7 @@
 - `goldcopier.discord_platform`: reads allowlisted human or bot Discord authors/channels, sharing the web database on the same host.
 - `goldcopier.platform_agent`: one Windows worker and one dedicated MT5 terminal per follower. Journals, automatic-exit state, and risk baselines persist locally.
 - `goldcopier.supervisor`: an optional operator-managed Windows pool of preinstalled terminal slots. A follower can select managed hosting when the operator configures it.
-- `goldcopier.master_bridge`: optional read-only MT5 analyst source, independent of the follower terminal pool.
+- `goldcopier.master_source`: read-only MT5/Exness observer in an account-scoped worker; `discord_logs` delivers its outbox independently.
 
 A member owns an account record; their browser can only read or change that account. An account worker token can only access that account's configuration, commands, and execution results. A supervisor token is privileged and can provision **all managed accounts**; do not distribute it to members. A signal-ingest token can submit analyst instructions; protect it like an execution credential.
 
@@ -170,7 +172,7 @@ Use **one supervisor instance**. There is no distributed fencing/automatic hot-s
 
 ## Signal and management grammar
 
-Configured instruments are supported through exact per-account broker mappings. See [the current trader/CMP grammar](../README.md#trader-signal-formats-cmp-and-later-updates) for bot alerts, later TP/BE messages, split entries, and AUTO behavior. SL and an entry/CMP reference are required; TP and BE are optional until supplied.
+Configured instruments are supported through exact per-account broker mappings. See [the current trader/CMP grammar](../README.md#trader-signal-formats-cmp-and-later-updates) for bot alerts, later TP/BE messages, split entries, and AUTO behavior. SL and an entry or CMP instruction are required; CMP needs no numeric quote; TP and BE are optional until supplied.
 
 ```text
 XAUUSD BUY
@@ -220,9 +222,11 @@ The frontend can request explicit BE, stop edits, partial/full close, and pendin
 
 ## Optional direct MT5 analyst mirroring
 
-Configure a dedicated, already logged-in **master source** terminal, `MASTER_TERMINAL_PATH`, `MASTER_LOGIN`, `MASTER_SERVER`, `MASTER_SYMBOL`, `MIRROR_ANALYST_ID`, and `SIGNAL_INGEST_TOKEN`. The same ingest token must be configured on the server. Run `python -m goldcopier.master_bridge` on the master Windows host.
+Use **Accounts → Trader source** and **Operator console → Configure trader source**, described in [the automatic setup guide](../README.md#recommended-setup-broker--copier--followers). It uses the source account's own worker token and supports MT5 (including Exness MT5) or an eligible direct Exness API account. No global ingest token is required. `goldcopier.master_bridge` is now a compatibility entry point to the scoped worker; its former environment-token workflow is retired.
 
-The bridge only reads the master. It baselines already-open positions at startup, mirrors newly opened positions with SL/TP, and emits referenced changes/partial/full-close events. BE is derived from the smaller of one stop-distance and half the target-distance; it is not an undocumented master BE setting. Master pending orders and scale-ins are not mirrored; use standard Discord signals for pending entries. Missing SL/TP or scale-ins require explicit operator review. Keep the bridge state file; do not run two instances for one analyst.
+Existing positions are baselined at startup. New filled positions with explicit SL are copied at follower CMP without inventing BE or requiring initial TP. Subsequent SL/TP changes, actual-fill BE, partial reductions and confirmed closes are referenced to the original source event. Durable event IDs survive lost HTTP responses/restarts; receipt lookup distinguishes a processed event from an expired unsent event. Unfilled master orders and scale-ins/reversals in the same position are not cloned. No broker mutation is permitted from a source-role worker. See README for polling/close-evidence limits and dedicated terminal configuration.
+
+Direct broker feeds ignore Discord input; `[Gold Copier log]` messages are never parsed as signals. Execution and Discord log delivery are independent processes; rate limits and Discord process failures do not stop the copier. The manual console form is optional for fresh tests on Discord-mode feeds and uses unique generated references.
 
 ## Stripe subscriptions
 

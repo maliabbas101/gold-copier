@@ -452,6 +452,9 @@ def main():
                         "in .env (or the terminal's saved login), then restart the server."
                     )
                 broker = PlatformBroker(cfg, mt)
+            from .master_source import MasterObserver
+
+            observer = MasterObserver(broker, ledger, client)
             while True:
                 # Validate the token before software-managed exits. A revoked worker must terminate.
                 try:
@@ -465,6 +468,8 @@ def main():
                     updated = response.json()
                     if updated["account_id"] != cfg["account_id"]:
                         raise ValueError("Worker account binding changed")
+                    cfg["purpose"] = updated.get("purpose", "follower")
+                    cfg["master_source"] = updated.get("master_source")
                     cfg["risk"] = updated["risk"]
                     cfg["pairs"] = updated.get("pairs", [])
                     cfg["enabled"] = updated["enabled"]
@@ -474,11 +479,38 @@ def main():
                     )
                 except httpx.HTTPError:
                     # BE is idempotent; partial closes require fresh authorization to reduce takeover races.
-                    monitor(broker, ledger, allow_partial=False)
+                    if cfg.get("purpose") != "master":
+                        monitor(broker, ledger, allow_partial=False)
                     logging.exception(
                         "Control service unavailable; no entries or partial exits"
                     )
                     time.sleep(1)
+                    continue
+                if cfg.get("purpose") == "master":
+                    try:
+                        source = cfg.get("master_source")
+                        if source:
+                            observer.step(source, cfg.get("pairs", []))
+                        else:
+                            observer.status = (
+                                "Configure this trader source in Operator console"
+                            )
+                        if (
+                            time.time() - observer.last_heartbeat >= 1
+                            or observer.status != observer.last_status
+                        ):
+                            snap = broker.snapshot()
+                            snap["source_status"] = observer.status
+                            client.post(
+                                "/api/worker/heartbeat", json=snap
+                            ).raise_for_status()
+                            observer.last_heartbeat = time.time()
+                            observer.last_status = observer.status
+                    except (httpx.HTTPError, ValueError, sqlite3.Error):
+                        logging.exception(
+                            "Read-only trader observation failed; no broker orders are submitted"
+                        )
+                    time.sleep(0.25)
                     continue
                 monitor(broker, ledger)
                 try:

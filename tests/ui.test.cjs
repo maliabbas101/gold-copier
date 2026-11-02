@@ -285,3 +285,51 @@ test('an open trade dialog stays bound to its original account when live account
   assert.ok(!calls.some(c=>c.url==='/api/accounts/replacement-account/commands'));
  }finally{dom.window.close()}
 });
+
+
+test('operator configures one read-only trader source instead of retyping trades',async()=>{
+ const oldRole=sample.user.role;sample.user.role='admin';
+ const dashboard=structuredClone(sample.dashboard);dashboard.accounts[0].purpose='master';
+ const{dom,w,calls}=await setup(true,{demo:false},dashboard);
+ try{
+  const original=w.fetch;const a=dashboard.accounts[0];
+  w.fetch=async(url,opt={})=>url==='/api/operator/status'?{ok:true,status:200,json:async()=>({accounts:[{...a,owned:true}],unresolved:[],sources:[],discord_logs:[],analysts:[{id:'direct-feed',name:'Trader source',source_mode:'broker',active:true,channel_id:'123456'}]})}:original(url,opt);
+  w.location.hash='operator';await tick();
+  assert.match(w.document.querySelector('.content').textContent,/No second signal entry is required/);
+  w.document.querySelector('[data-action="source-setup"]').click();await tick();
+  const form=w.document.querySelector('#source-form');assert.ok(form);
+  assert.equal(form.elements.namedItem('account_id').value,a.id);
+  assert.equal(form.elements.namedItem('log_channel_id').value,'123456');
+  form.querySelector('#source-consent').checked=true;form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  const call=calls.find(c=>c.url==='/api/operator/master-sources');assert.ok(call);
+  assert.equal(JSON.parse(call.opt.body).confirm_read_only,true);
+  assert.equal(JSON.parse(call.opt.body).account_id,a.id);
+  assert.ok(!calls.some(c=>c.url==='/api/operator/signals'));
+ }finally{sample.user.role=oldRole;dom.window.close()}
+});
+
+
+test('manual tests are clearly optional and CMP template needs no current price',async()=>{
+ const oldRole=sample.user.role;sample.user.role='admin';
+ const{dom,w}=await setup(true,{demo:false});
+ try{
+  const original=w.fetch;w.fetch=async(url,opt={})=>url==='/api/operator/status'?{ok:true,status:200,json:async()=>({accounts:[],unresolved:[],analysts:[{id:'discord',name:'Discord feed',source_mode:'discord'}]})}:original(url,opt);
+  w.location.hash='operator';await tick();w.document.querySelector('[data-action="signal-tool"]').click();await tick();
+  assert.match(w.document.querySelector('#modal').textContent,/Do not enter the same Discord message here/);
+  assert.match(w.document.querySelector('#source_id').value,/^manual-/);
+  const template=w.document.querySelector('#signal-template');template.value='cmp';template.dispatchEvent(new w.Event('change',{bubbles:true}));
+  assert.equal(w.document.querySelector('#signal-text').value.split('\n')[0],'BUY XAUUSD CMP');
+ }finally{sample.user.role=oldRole;dom.window.close()}
+});
+
+
+test('trader account setup stops requiring a followed analyst',async()=>{
+ const oldRole=sample.user.role;sample.user.role='admin';
+ const{dom,w}=await setup(true,{demo:false,local_worker_available:true});
+ try{
+  w.location.hash='accounts';await tick();w.document.querySelector('[data-action="connect"]').click();await tick();
+  const purpose=w.document.querySelector('#purpose');purpose.value='master';purpose.dispatchEvent(new w.Event('change',{bubbles:true}));
+  assert.equal(w.document.querySelector('#connect-analyst').required,false);
+  assert.equal(w.document.querySelector('#connect-analyst').disabled,true);
+ }finally{sample.user.role=oldRole;dom.window.close()}
+});

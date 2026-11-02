@@ -105,3 +105,129 @@ by default.
 Open **Trading pairs** for canonical pair/alias CRUD and per-account broker mappings, with per-instrument spread, entry-distance, and lot limits. Multiple distinct signals, including identical-price signals with different message IDs, are queued independently. A single message may contain up to 20 complete signal blocks separated by `---`.
 
 **Accounts → Exness API** provisions the official signed direct connector for eligible Exness trading accounts. It is separate from MT5 and remains read-only with live execution disabled. See [docs/INSTRUMENTS_AND_EXNESS.md](docs/INSTRUMENTS_AND_EXNESS.md) for eligibility, configuration, confirmation semantics, acceptance limits, and migration instructions. No live API credentials were used to test this integration.
+
+## Trader signal formats, CMP, and later updates
+
+The alerts below use your trader's historical prices as **syntax examples**, not current trade recommendations. Send each code block as a separate Discord message from the configured author. Do not paste a whole chat transcript, usernames, timestamps, or commentary into a signal. The parser accepts `@everyone`, `@Forex Alert`, bold markers, bullet targets, and signed pip annotations; it sizes from actual prices and broker contracts, not the printed pip counts. Text in Discord embeds (title, description, and fields) is also read. Images/OCR are unsupported.
+
+### Execute now at CMP
+
+```text
+BUY XAUUSD CMP 3900.7
+SL : 3894.7 (-60 pips)
+```
+
+CMP means a market request on receipt, using the follower's current **Ask for BUY / Bid for SELL**. The printed CMP is a reference price, not a guaranteed fill. The account's pair-specific entry tolerance still applies; a stale/moved CMP is rejected rather than chased or converted to a pending order. `XAUUSD BUY CMP` or `XAUUSD BUY MARKET` with `ENTRY: 3900.7` is also accepted.
+
+**SL is mandatory. TP and BE may arrive later.** With no TP, the position initially has only its broker-side SL; no target or automatic BE price is invented. Without a BE trigger the bot does not automatically move the stop, but a later explicit BE command is supported. In **Operator console → Signal preview & intake**, choose the **CMP — current market price** template, edit the prices, preview, then explicitly submit. Selecting a template does not trade.
+
+### Place a pending order
+
+```text
+PLACE XAUUSD SELL LIMIT
+Entry : 3909.0
+SL : 3920.0 (-110 pips)
+TP : 3870.5 (+385 pips)
+```
+
+`XAUUSD SELL LIMIT` is equivalent. Use LIMIT for a pullback (BUY below Ask / SELL above Bid), STOP for a breakout (BUY above Ask / SELL below Bid). Pending orders are submitted to the broker immediately and then wait there for a trigger; they are not market orders waiting in the application's queue.
+
+| Entry instruction | Behavior |
+| --- | --- |
+| `BUY XAUUSD CMP 3900.7` | Market now, subject to tolerance and all risk checks |
+| `XAUUSD BUY MARKET` + `ENTRY:` | Same immediate market behavior |
+| `XAUUSD BUY` or `XAUUSD BUY AUTO` + `ENTRY:` | Market if within entry tolerance; otherwise choose the corresponding broker LIMIT or STOP |
+| `XAUUSD BUY LIMIT` / `STOP` + exact `ENTRY:` | Explicit pending order; rejected if on the wrong side of the current quote |
+| AUTO with `ENTRY: 3900 - 3902` | Market within the zone/tolerance; otherwise pending at the nearest zone edge |
+| LIMIT/STOP with `ENTRY: 3947 | 3943.5` | Two separate broker orders, with the message's total risk split equally |
+
+This changes the old implicit-market behavior for entries without an order type. Explicit `MARKET`/CMP remains immediate. Upgrade the listener, service, and workers together; existing jobs and historical messages are not reinterpreted or replayed.
+
+### Half risk and two entries
+
+```text
+SELL XAUUSD CMP 3940.4
+Half Risk (0.5r)
+SL : 3951.0 (-106 pips)
+```
+
+```text
+PLACE XAUUSD BUY LIMIT
+Entry : 3947.0 | 3943.5
+Half Risk (0.5r)
+SL : 3934.5 (-125 pips)
+```
+
+`Half Risk (0.5r)` halves the configured risk budget and fixed lot amount; it does not mean 0.5 lots. For a configured 0.5% risk cap, half risk is 0.25% total; the two-entry message receives 0.125% per leg. Minimum lots, rounding, aggregate risk, and position limits still apply. Legs execute independently: one can be accepted while another is rejected. A price separated with `-` is an entry zone; `|` explicitly requests separate legs. Never turn a two-entry alert into a single midpoint order.
+
+### Set TP later and move SL to BE
+
+Reply to the original signal message in Discord, or add `SIGNAL: <original message ID>` as below. Replace `123456789` with the real original ID; do not copy the example ID into production.
+
+```text
+XAUUSD Set TP:
+• TP1: 3955.0 (+80 pips)
+• TP2: 3975.0 (+280 pips)
+SIGNAL: 123456789
+```
+
+```text
+XAUUSD Move SL to Breakeven (3947.0)
+SIGNAL: 123456789
+```
+
+The original two-entry message ID updates **both legs**. Append `-1` or `-2` to target one leg. BE always uses each follower's actual fill; the trader's printed `3947.0` is informational. TP1/TP2 use your configured partial-close allocations, and changes propagate to broker pending orders as well as filled copier positions. Software targets and BE need a running worker; broker-side SL remains in place.
+
+An unreferenced symbol update is accepted only when exactly one unclosed signal group exists for that analyst/pair. With overlapping BUY/SELL alerts, missing context, or older unclosed signals, it is rejected visibly; **the bot never guesses that the newest trade is the intended one**. Your sample has overlapping sell and buy instructions, so replies or explicit IDs are necessary. `Stop Loss Hit` / `Trade Closed` status messages close this routing context, but never liquidate a follower's broker account. If the master and follower outcomes differ, use an explicit referenced command.
+
+The existing management syntax still works:
+
+```text
+UPDATE SIGNAL: 123456789
+SL: 3940
+TP1: 3955
+TP2: 3975
+```
+
+`BE SIGNAL: 123456789`, `CLOSE SIGNAL: 123456789`, `CANCEL SIGNAL: 123456789`, and `PARTIAL SIGNAL: 123456789` plus `PERCENT: 50` are explicit broker instructions. Updates/replies are scoped to the configured analyst and original pair, never another trader's signal.
+
+### Status alerts are not new trades
+
+These are recognized as informational announcements:
+
+```text
+XAUUSD Entry Triggered
+```
+
+```text
+XAUUSD Entry 1 Triggered
+```
+
+```text
+XAUUSD TP 1 Hit (+80 pips)
+```
+
+```text
+XAUUSD Stop Loss Hit -110 pips
+```
+
+```text
+XAUUSD Trade Closed (3947.9)
+Result: -75 pips
+```
+
+Use the same reply/reference rule if several signals are active. A status message never reopens, doubles a partial close, or substitutes for the follower's broker confirmation. Narrative commentary such as “market is waiting” is not an executable signal. Configure the **APP/bot author's actual ID** if that author posts alerts; the human analyst's ID alone will not authorize another bot. A webhook must itself be explicitly configured by its exact author/webhook ID, guild, and channel; display names and roles do not authorize trades.
+
+## If price was hit but no trade appeared
+
+The previous implicit market entry was checked once at receipt and could reject outside tolerance; it did not wait for price to revisit the entry. Use explicit LIMIT/STOP or the new AUTO behavior when you intend to wait.
+
+1. Open **Activity** for `signal skipped` / `Discord source ... ignored` reasons. Check the exact author/channel, pair mapping, followed analyst, Copying switch, healthy worker heartbeat, and live/demo gate. The listener does not replay old posts or backfill a trigger missed while it was off.
+2. Open **Trades & orders → Execution history**. `queued` is waiting for a worker, `rejected` contains the reason, and `uncertain` requires broker reconciliation before any retry. Broker preflight errors now include the broker code/comment. A successfully placed pending order says **waiting for price trigger**, with its broker ticket; it does not mean a position filled.
+3. Check **Pending broker orders** and MT5's Trade/History tabs. BUY triggers use Ask and SELL triggers use Bid; touching a chart's displayed price alone may not trigger the order because of spread. Check trading sessions, margin, stop distances, supported lot sizes, and broker permissions.
+4. Pair spread/entry limits, daily loss/drawdown protection, max open positions, and aggregate risk can block a valid signal. A “Daily equity loss stop reached” message is a risk rejection, not a parsing error. Confirm the cause on a demo account before changing risk settings.
+5. Intake instructions expire after 60 seconds. An accepted MT5 pending order normally expires after one hour; symbols supporting only GTC retain it until explicit cancellation. The direct Exness API pending schema has no expiration field. Inspect broker history to distinguish rejection, cancellation, expiry, and fills.
+
+Without your execution-history result or broker ticket, the exact cause of a particular missed trade cannot be established from the signal text alone. Never resubmit an uncertain operation just because the position is not visible yet.
+
+Official execution references: [MT5 order submission](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersend_py) and [order types / fill policies](https://www.mql5.com/en/docs/constants/tradingconstants/orderproperties).

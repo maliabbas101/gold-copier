@@ -141,3 +141,20 @@ test('disconnected account stays visibly disconnected and cannot start copying',
  const {dom,w}=await setup(true,{demo:false},dashboard);
  try{w.location.hash='accounts';await tick();const card=w.document.querySelector('.account-card');assert.match(card.textContent,/Disconnected/);assert.equal(card.querySelector('[data-action="toggle-copy"]').disabled,true);assert.equal(card.querySelector('[data-action="disconnect"]').disabled,true);assert.ok(card.querySelector('[data-action="delete-account"]'))}finally{dom.window.close()}
 });
+
+
+test('signal intake offers an explicit CMP template without silently queueing it',async()=>{
+ const oldRole=sample.user.role;sample.user.role='admin';
+ const{dom,w,calls}=await setup(true,{demo:false});
+ try{
+  const originalFetch=w.fetch;w.fetch=async(url,opt={})=>url==='/api/operator/status'?{ok:true,status:200,json:async()=>({accounts:[],unresolved:[],analysts:[{id:'analyst',name:'Trader'}]})}:originalFetch(url,opt);
+  w.location.hash='operator';await tick();
+  w.document.querySelector('[data-action="signal-tool"]').click();await tick();
+  const select=w.document.querySelector('#signal-template');assert.ok(select);
+  const confirm=w.document.querySelector('#signal-confirm');confirm.checked=true;
+  select.value='cmp';select.dispatchEvent(new w.Event('change',{bubbles:true}));
+  assert.match(w.document.querySelector('#signal-text').value,/BUY XAUUSD CMP/);
+  assert.equal(confirm.checked,false);
+  assert.ok(!calls.some(c=>c.url==='/api/operator/signals'));
+ }finally{sample.user.role=oldRole;dom.window.close()}
+});

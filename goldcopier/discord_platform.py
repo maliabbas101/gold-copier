@@ -11,7 +11,7 @@ from .platform_store import PlatformStore
 def feeds(store, message, listener_id=None):
     if (
         not message.guild
-        or message.webhook_id is not None
+        or (message.webhook_id is not None and message.webhook_id != message.author.id)
         or (listener_id is not None and message.author.id == listener_id)
     ):
         return []
@@ -28,10 +28,21 @@ def feeds(store, message, listener_id=None):
             )
         ]
 
+
 def ingest(store, message, edit=False, *, billing=False, listener_id=None):
     results = []
     for analyst in feeds(store, message, listener_id):
-        text = message.content
+        text = message.content or ""
+        for embed in getattr(message, "embeds", []):
+            parts = [getattr(embed, "title", None), getattr(embed, "description", None)]
+            parts = [
+                p
+                for p in parts
+                if p and p.strip().upper() not in ("FOREX ALERT", "@FOREX ALERT")
+            ]
+            parts.extend(f"{f.name}: {f.value}" for f in getattr(embed, "fields", []))
+            text += "\n" + "\n".join(part for part in parts if part)
+        reference_id = getattr(getattr(message, "reference", None), "message_id", None)
         source = str(message.id)
         created = message.created_at.timestamp()
         if edit:
@@ -53,7 +64,14 @@ def ingest(store, message, edit=False, *, billing=False, listener_id=None):
             old = json.loads(original[0])
             if any(
                 old.get(k) != parsed.get(k)
-                for k in ("symbol", "side", "entry", "entry_low", "entry_high", "order_type")
+                for k in (
+                    "symbol",
+                    "side",
+                    "entry",
+                    "entry_low",
+                    "entry_high",
+                    "order_type",
+                )
             ):
                 logging.warning(
                     "Edited signal changed entry; explicit cancel/new signal is required"
@@ -61,18 +79,46 @@ def ingest(store, message, edit=False, *, billing=False, listener_id=None):
                 continue
             if old["sl"] == parsed["sl"] and old["tp"] == parsed["tp"]:
                 continue
-            text = (
-                f"UPDATE SIGNAL: {source}\nSL: {parsed['sl']}\nTP: {parsed['tp']}"
-            )
+            if old.get("tp") and not parsed.get("tp"):
+                raise ValueError(
+                    "Removing targets through an entry edit is unsupported; use explicit management"
+                )
+            fields = [f"SL: {parsed['sl']}"]
+            fields.extend(f"TP{i + 1}: {tp}" for i, tp in enumerate(parsed["targets"]))
+            text = f"UPDATE SIGNAL: {source}\n" + "\n".join(fields)
             created = message.edited_at.timestamp()
             source = source + ":edit:" + str(int(created * 1e6))
-        result = store.ingest(
-            analyst["id"],
-            source,
-            text,
-            created,
-            billing=billing,
-        )
+        try:
+            result = store.ingest(
+                analyst["id"],
+                source,
+                text,
+                created,
+                billing=billing,
+                reference_id=reference_id,
+            )
+        except ValueError as exc:
+            # Keep failed actionable alerts visible to followers without copying message content.
+            import re
+
+            if re.search(
+                r"\b(BUY|SELL|SET TP|BREAKEVEN|STOP LOSS HIT|ENTRY TRIGGERED)\b",
+                text,
+                re.I,
+            ):
+                with store.db() as db:
+                    for row in db.execute(
+                        "SELECT DISTINCT a.user_id,a.id FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=? AND a.disconnected=0",
+                        (analyst["id"],),
+                    ).fetchall():
+                        store.event(
+                            db,
+                            row["user_id"],
+                            "alert",
+                            f"Discord source {source} ignored: {str(exc)[:300]}",
+                            row["id"],
+                        )
+            raise
         logging.info("Discord source %s: %s", source, result)
         results.append(result)
     return results
@@ -93,7 +139,8 @@ def main():
     async def on_message(message):
         try:
             ingest(
-                store, message,
+                store,
+                message,
                 billing=os.environ.get("BILLING_ENABLED", "false") == "true",
                 listener_id=client.user.id if client.user else None,
             )
@@ -104,7 +151,9 @@ def main():
     async def on_message_edit(before, after):
         try:
             ingest(
-                store, after, True,
+                store,
+                after,
+                True,
                 billing=os.environ.get("BILLING_ENABLED", "false") == "true",
                 listener_id=client.user.id if client.user else None,
             )

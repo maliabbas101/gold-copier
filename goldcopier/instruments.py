@@ -50,6 +50,9 @@ def migrate(db):
     CREATE TABLE IF NOT EXISTS signal_messages(analyst_id TEXT NOT NULL,source_id TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(analyst_id,source_id));
     """)
     db.execute("BEGIN IMMEDIATE")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS signal_threads(analyst_id TEXT NOT NULL,source_id TEXT NOT NULL,symbol TEXT NOT NULL,closed INTEGER NOT NULL DEFAULT 0,created REAL NOT NULL,PRIMARY KEY(analyst_id,source_id,symbol))"
+    )
     if "disconnected" not in [r[1] for r in db.execute("PRAGMA table_info(accounts)")]:
         db.execute(
             "ALTER TABLE accounts ADD COLUMN disconnected INTEGER NOT NULL DEFAULT 0"

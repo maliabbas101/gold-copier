@@ -18,7 +18,7 @@ This implementation uses the public descriptions of Inspired Analyst Bot as a fu
 | Crypto payments | Not implemented |
 | Secure stored credentials | Server-side AES-256-GCM at-rest vault; no claim of client-side/end-to-end encryption |
 | Direct analyst MT5 mirroring | Read-only master-position bridge implemented; master pending orders/scale-ins excluded |
-| Pending follower entries | Supported through Discord LIMIT/STOP signals |
+| Pending follower entries | Explicit LIMIT/STOP and AUTO; CMP executes at current market within tolerance |
 | Hot standby / zero-downtime claims | Not implemented as an automatic trading failover mechanism; supervised recovery documented |
 | P&L and trade visibility | Snapshot equity chart, current positions/orders, today's closed deals, realized P&L, command history and CSV |
 | Multiple instruments | Configurable canonical pair directory, aliases, per-account broker mappings and limits; multi-signal intake |
@@ -30,3 +30,5 @@ The local demo is a real runnable application with labelled sample records and b
 Automated tests verify application behavior with fake broker/provider responses. They do not certify Windows/MT5 behavior, broker execution, infrastructure uptime, or payment-provider approval.
 
 The multi-instrument / direct API update supersedes the original gold-only limitations. See [INSTRUMENTS_AND_EXNESS.md](INSTRUMENTS_AND_EXNESS.md).
+
+Trader APP templates, optional later TP/BE, half-risk split entries, referenced/reply updates and informational status messages are covered by [README examples](../README.md#trader-signal-formats-cmp-and-later-updates).

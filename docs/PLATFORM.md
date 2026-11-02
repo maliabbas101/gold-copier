@@ -139,7 +139,7 @@ accounts); issuing a token pauses copying until you click Start copying again.
 For self hosting, set `MT5_PASSWORD` to log in automatically with the account login
 and server registered in the app, or leave it blank and use a saved terminal login. A managed worker receives the decrypted trading password over its authenticated configuration endpoint and initializes the terminal with it. The worker verifies login, server, account mode, hedging mode, trading permissions, and fresh quotes. It does not accept whatever account happens to be logged into a terminal.
 
-Filling mode must match your broker: 0 FOK, 1 IOC, 2 RETURN. Pending entries use RETURN and broker-expiring orders with a default one-hour TTL. Broker support for time-specified pending orders must be checked; unsupported instructions fail preflight. Market signal TTL defaults to 60 seconds. A missed entry is not automatically chased or requeued.
+Market filling policy is selected from broker symbol capabilities when reported (0 FOK, 1 IOC, 2 RETURN). Pending entries use RETURN and time-specified orders with a default one-hour TTL where supported; GTC-only symbols use GTC and require explicit cancellation. Market signal TTL defaults to 60 seconds. A missed entry is not automatically chased or requeued.
 
 After a fresh heartbeat, follow an analyst and click **Start copying**. The service refuses to start an offline/unverified account, an unresolved account, or a live account when the operator gate is disabled. In production with billing enabled, it also checks an active subscription.
 
@@ -170,7 +170,7 @@ Use **one supervisor instance**. There is no distributed fencing/automatic hot-s
 
 ## Signal and management grammar
 
-Only text signals for XAUUSD are supported. Configure the exact broker suffix independently for each account.
+Configured instruments are supported through exact per-account broker mappings. See [the current trader/CMP grammar](../README.md#trader-signal-formats-cmp-and-later-updates) for bot alerts, later TP/BE messages, split entries, and AUTO behavior. SL and an entry/CMP reference are required; TP and BE are optional until supplied.
 
 ```text
 XAUUSD BUY
@@ -181,7 +181,7 @@ TP2: 2720
 BE: 2705
 ```
 
-Use `XAUUSD BUY LIMIT`, `SELL LIMIT`, `BUY STOP`, or `SELL STOP` with an **exact** ENTRY for pending orders. A single target uses `TP:`. BUY requires `SL < entry < BE <= TP1 <= TP2` with distinct ordered targets; SELL reverses the order.
+Use `XAUUSD BUY LIMIT`, `SELL LIMIT`, `BUY STOP`, or `SELL STOP` with an **exact** ENTRY for pending orders. A single target uses `TP:`. BUY requires its SL below entry and any targets above entry, with ordered targets. An optional BE trigger must lie beyond entry and no further than TP1. SELL reverses the order. Untyped entries use AUTO; explicit MARKET/CMP executes immediately subject to entry tolerance.
 
 Referenced instructions use the original Discord entry message ID:
 
@@ -202,11 +202,11 @@ PERCENT: 50
 
 `CLOSE SIGNAL: 123456789` closes matching open positions. `CANCEL SIGNAL: 123456789` cancels matching pending orders. Neither is interpreted as the other. The reference must belong to the same analyst feed. Invalid formats, images/embeds, ambiguous instructions, unrelated instruments, and unauthorized authors are ignored/rejected.
 
-An analyst can be a human Discord user or a signal bot. In **Operator console / Add authorized analyst**, enter that author's user ID together with the exact server (guild) and channel IDs. Each member follows that analyst for each MT5 account and enables copying after the worker connects. The same authorization and signal parser apply to both author types. Unconfigured authors, webhooks, DMs, and messages from the listener itself are ignored. Bots must put the supported signal text in message content; embed/image-only signals are not parsed.
+An analyst can be a human Discord user or a signal bot. In **Operator console / Add authorized analyst**, enter that author's user ID together with the exact server (guild) and channel IDs. Each member follows that analyst for each MT5 account and enables copying after the worker connects. The same authorization and signal parser apply to both author types. Unconfigured authors/webhooks, DMs, and messages from the listener itself are ignored. Webhooks require an exact configured author/webhook ID match. Message content and textual embed titles/descriptions/fields are parsed; images are not.
 
 Orders follow this path: **Discord author -> configured analyst -> following, enabled accounts -> account worker queue -> Windows MT5 terminal -> broker**. The broker label (including Exness) does not select a website integration. Workers use the MetaTrader5 Python API, not the Exness website or browser automation. Broker/terminal trading permissions, risk limits, freshness, and operator gates still apply; a signal cannot force an order past those checks.
 
-Discord text edits propagate only SL/final-TP changes to an already ingested entry. An entry-price/side/type edit never creates a second trade. Changes to TP1/BE/range semantics require a new explicit supported instruction; post deletion never means cancel/close.
+Discord text edits propagate only SL/final-TP changes to an already ingested entry. An entry-price/side/type edit never creates a second trade. TP1/TP2 changes are supported through referenced updates. Future BE trigger/range changes require a new explicit supported instruction; post deletion never means cancel/close.
 
 ## Trade management
 

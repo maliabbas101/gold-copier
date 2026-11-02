@@ -415,7 +415,16 @@ class PlatformStore:
             self.event(db, None, "admin", "Analyst added: " + data["name"])
         return ident
 
-    def ingest(self, analyst_id, source_id, text, created, ttl=60, billing=False):
+    def ingest(
+        self,
+        analyst_id,
+        source_id,
+        text,
+        created,
+        ttl=60,
+        billing=False,
+        reference_id=None,
+    ):
         from .instruments import canonical
 
         if not time.time() - ttl <= created <= time.time() + 5:
@@ -452,18 +461,84 @@ class PlatformStore:
                 payload = {**item, "origin": "analyst"}
                 if payload["action"] == "entry":
                     payload["symbol"] = canonical(db, payload["symbol"])
-                else:
-                    reference = db.execute(
-                        "SELECT id,payload FROM feeds WHERE analyst_id=? AND lower(source_id)=? AND json_extract(payload,'$.action')='entry'",
-                        (analyst_id, payload["signal_id"]),
-                    ).fetchone()
-                    if not reference:
+                    payload["source_group"] = source_id
+                    db.execute(
+                        "INSERT OR IGNORE INTO signal_threads VALUES(?,?,?,0,?)",
+                        (analyst_id, source_id, payload["symbol"], created),
+                    )
+                    payloads.append(payload)
+                    continue
+                pair = (
+                    canonical(db, payload["symbol"]) if payload.get("symbol") else None
+                )
+                ref = payload.get("signal_id") or reference_id
+                if not ref:
+                    threads = db.execute(
+                        "SELECT source_id FROM signal_threads WHERE analyst_id=? AND symbol=? AND closed=0",
+                        (analyst_id, pair),
+                    ).fetchall()
+                    if len(threads) != 1:
                         raise ValueError(
-                            "Management reference does not belong to this analyst"
+                            "Ambiguous or missing original signal. Reply to its Discord message or add SIGNAL: <source message ID>."
                         )
-                    payload["signal_id"] = reference["id"]
-                    payload["symbol"] = json.loads(reference["payload"])["symbol"]
-                payloads.append(payload)
+                    ref = threads[0][0]
+                refs = db.execute(
+                    "SELECT id,payload FROM feeds WHERE analyst_id=? AND json_extract(payload,'$.action')='entry' AND (lower(source_id)=? OR lower(json_extract(payload,'$.source_group'))=?)",
+                    (analyst_id, str(ref).lower(), str(ref).lower()),
+                ).fetchall()
+                refs = [
+                    r
+                    for r in refs
+                    if not pair or json.loads(r["payload"])["symbol"] == pair
+                ]
+                if (
+                    not refs
+                    or len({json.loads(r["payload"])["symbol"] for r in refs}) != 1
+                ):
+                    raise ValueError(
+                        "Management reference must identify this analyst's original signal and pair"
+                    )
+                for reference in refs:
+                    original = json.loads(reference["payload"])
+                    update = {
+                        **payload,
+                        "signal_id": reference["id"],
+                        "symbol": original["symbol"],
+                    }
+                    if update.get("targets"):
+                        targets = update["targets"]
+                        buy = original["side"] == "BUY"
+                        edge = original["entry_high"] if buy else original["entry_low"]
+                        if (
+                            (buy and targets[0] <= edge)
+                            or (not buy and targets[0] >= edge)
+                            or (
+                                len(targets) > 1
+                                and (
+                                    (buy and targets[1] <= targets[0])
+                                    or (not buy and targets[1] >= targets[0])
+                                )
+                            )
+                        ):
+                            raise ValueError(
+                                "Updated targets must progress beyond the original entry"
+                            )
+                    if update.get("closed"):
+                        group = original.get("source_group", str(ref))
+                        db.execute(
+                            "UPDATE feeds SET payload=json_set(payload,'$.routing_closed',1) WHERE id=?",
+                            (reference["id"],),
+                        )
+                        still_open = db.execute(
+                            "SELECT 1 FROM feeds WHERE analyst_id=? AND json_extract(payload,'$.source_group')=? AND json_extract(payload,'$.symbol')=? AND json_extract(payload,'$.action')='entry' AND COALESCE(json_extract(payload,'$.routing_closed'),0)=0",
+                            (analyst_id, group, original["symbol"]),
+                        ).fetchone()
+                        if not still_open:
+                            db.execute(
+                                "UPDATE signal_threads SET closed=1 WHERE analyst_id=? AND source_id=? AND symbol=?",
+                                (analyst_id, group, original["symbol"]),
+                            )
+                    payloads.append(update)
             db.execute(
                 "INSERT INTO signal_messages VALUES(?,?,?)",
                 (analyst_id, source_id, created),
@@ -484,13 +559,43 @@ class PlatformStore:
                     (feed, analyst_id, ref, dump(payload), created),
                 )
                 for a in rows:
+                    if payload["action"] == "notice":
+                        self.event(
+                            db,
+                            a["user_id"],
+                            "signal",
+                            payload["symbol"]
+                            + " analyst status: "
+                            + payload["notice"]
+                            + " (informational; no broker command)",
+                            a["id"],
+                        )
+                        continue
                     risk = json.loads(a["follow_risk"] or a["risk"])
                     if payload["action"] == "entry":
-                        if (
-                            not a["enabled"]
-                            or not a["heartbeat"]
-                            or time.time() - a["heartbeat"] > 30
-                        ):
+                        snapshot_error = json.loads(a["snapshot"] or "{}").get("error")
+                        reason = None
+                        if not a["enabled"]:
+                            reason = "Copying is paused"
+                        elif not a["heartbeat"] or time.time() - a["heartbeat"] > 30:
+                            reason = "Worker is offline or heartbeat is stale"
+                        elif snapshot_error:
+                            reason = "Worker reports: " + snapshot_error
+                        if reason:
+                            self.event(
+                                db,
+                                a["user_id"],
+                                "alert",
+                                payload["symbol"] + " signal skipped: " + reason,
+                                a["id"],
+                            )
+                            skipped.append(
+                                {
+                                    "account_id": a["id"],
+                                    "pair": payload["symbol"],
+                                    "reason": reason,
+                                }
+                            )
                             continue
                         if billing:
                             sub = db.execute(
@@ -503,6 +608,21 @@ class PlatformStore:
                                 or not sub["period_end"]
                                 or sub["period_end"] < time.time()
                             ):
+                                reason = "Active subscription required"
+                                self.event(
+                                    db,
+                                    a["user_id"],
+                                    "alert",
+                                    payload["symbol"] + " signal skipped: " + reason,
+                                    a["id"],
+                                )
+                                skipped.append(
+                                    {
+                                        "account_id": a["id"],
+                                        "pair": payload["symbol"],
+                                        "reason": reason,
+                                    }
+                                )
                                 continue
                         mapping = db.execute(
                             "SELECT * FROM account_pairs WHERE account_id=? AND pair=? AND enabled=1",
@@ -526,6 +646,8 @@ class PlatformStore:
                             }
                         )
                         risk["max_lots"] = min(risk["max_lots"], mapping["max_lots"])
+                        for key in ("risk_pct", "cash_risk", "fixed_lots"):
+                            risk[key] *= payload.get("risk_factor", 1)
                         jobpayload = {
                             **payload,
                             "signal_id": feed,

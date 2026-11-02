@@ -179,6 +179,17 @@ def execute(job, broker, ledger):
                             "tp": track.get("manual_tp", False),
                         }
                 command["overrides"] = overrides
+            if command.get("targets"):
+                runner = (
+                    command.get("multi_target")
+                    and sum(
+                        [job["risk"]["tp1_close_pct"], job["risk"]["tp2_close_pct"]][
+                            : len(command["targets"])
+                        ]
+                    )
+                    < 100
+                )
+                command["tp"] = 0 if runner else command["targets"][-1]
             requests = broker.prepare_control(command)
         if time.time() >= job["expires"]:
             raise ValueError("Instruction expired during preflight")
@@ -208,6 +219,14 @@ def execute(job, broker, ledger):
         ).fetchall():
             managed = ledger.management(original["id"])
             entry = json.loads(original["job"])
+            if signal.get("signal_id") == entry["signal"].get(
+                "signal_id"
+            ) and signal.get("targets"):
+                entry["signal"].update(
+                    targets=signal["targets"],
+                    tp=signal["targets"][-1],
+                    multi_target=signal.get("multi_target", False),
+                )
             for request in requests:
                 track = managed.get(str(request.get("position")))
                 if not track:
@@ -263,7 +282,9 @@ def monitor(broker, ledger, allow_partial=True):
                     track["manual_tp"] = True
                 buy = signal["side"] == "BUY"
                 price = tick.bid if buy else tick.ask
-                be_reached = price >= signal["be"] if buy else price <= signal["be"]
+                be_reached = bool(signal.get("be")) and (
+                    price >= signal["be"] if buy else price <= signal["be"]
+                )
                 tighter = p.sl >= p.price_open if buy else 0 < p.sl <= p.price_open
                 if (
                     risk["be_enabled"]

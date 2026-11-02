@@ -122,21 +122,53 @@ class PlatformBroker(MT5Broker):
         buy = signal["side"] == "BUY"
         kind = self.mt.ORDER_TYPE_BUY if buy else self.mt.ORDER_TYPE_SELL
         market = tick.ask if buy else tick.bid
-        pending = signal["order_type"] != "MARKET"
+        order_type = signal["order_type"]
+        if order_type == "AUTO":
+            near = (
+                signal["entry_low"] - risk["max_entry_distance"]
+                <= market
+                <= signal["entry_high"] + risk["max_entry_distance"]
+            )
+            order_type = (
+                "MARKET"
+                if near
+                else "LIMIT"
+                if (
+                    (buy and signal["entry"] < market)
+                    or (not buy and signal["entry"] > market)
+                )
+                else "STOP"
+            )
+        pending = order_type != "MARKET"
         price = signal["entry"] if pending else market
+        if pending and signal["order_type"] == "AUTO":
+            price = (
+                signal["entry_high"]
+                if market > signal["entry_high"]
+                else signal["entry_low"]
+            )
         if (
             not pending
             and not signal["entry_low"] - risk["max_entry_distance"]
             <= price
             <= signal["entry_high"] + risk["max_entry_distance"]
         ):
-            raise ValueError("Price moved outside entry tolerance")
-        if (buy and not signal["sl"] < price < signal["be"] <= signal["tp"]) or (
-            not buy and not signal["tp"] <= signal["be"] < price < signal["sl"]
+            raise ValueError(
+                f"Price moved outside entry tolerance: broker {'Ask' if buy else 'Bid'}={price}, entry={signal['entry_low']}..{signal['entry_high']}, tolerance={risk['max_entry_distance']}; use LIMIT/STOP for a waiting entry"
+            )
+        if (buy and signal["sl"] >= price) or (not buy and signal["sl"] <= price):
+            raise ValueError("Price no longer supports signal stop loss")
+        if signal.get("be") and (
+            (buy and price >= signal["be"]) or (not buy and price <= signal["be"])
         ):
-            raise ValueError("Price no longer supports signal protection")
+            raise ValueError("Price has already passed the BE trigger")
+        if signal.get("targets") and (
+            (buy and price >= signal["targets"][0])
+            or (not buy and price <= signal["targets"][0])
+        ):
+            raise ValueError("Price has already passed the first target")
         if pending:
-            limit = signal["order_type"] == "LIMIT"
+            limit = order_type == "LIMIT"
             if (
                 (buy and limit and price >= tick.ask)
                 or (buy and not limit and price <= tick.ask)
@@ -168,7 +200,9 @@ class PlatformBroker(MT5Broker):
         if risk["sizing"] == "cash" and estimated > risk["cash_risk"] + 1e-8:
             raise ValueError("Trade exceeds cash risk budget")
         distance = info.trade_stops_level * info.point
-        if abs(price - signal["sl"]) < distance or abs(price - signal["tp"]) < distance:
+        if abs(price - signal["sl"]) < distance or (
+            signal["tp"] and abs(price - signal["tp"]) < distance
+        ):
             raise ValueError("Stops are too close for this broker")
         # For multi-target signals TP exits are journaled software operations.
         # A 100% TP allocation can keep a broker-side final TP as an additional protection.
@@ -202,12 +236,36 @@ class PlatformBroker(MT5Broker):
                 (False, "LIMIT"): self.mt.ORDER_TYPE_SELL_LIMIT,
                 (True, "STOP"): self.mt.ORDER_TYPE_BUY_STOP,
                 (False, "STOP"): self.mt.ORDER_TYPE_SELL_STOP,
-            }[(buy, signal["order_type"])]
+            }[(buy, order_type)]
             request["type_filling"] = self.mt.ORDER_FILLING_RETURN
             request["type_time"] = self.mt.ORDER_TIME_SPECIFIED
             request["expiration"] = int(
                 time.time() + self.cfg.get("pending_ttl_seconds", 3600)
             )
+        if not pending and hasattr(info, "filling_mode"):
+            flags = info.filling_mode
+            requested = request["type_filling"]
+            allowed = ([0] if flags & 1 else []) + ([1] if flags & 2 else [])
+            if getattr(info, "trade_exemode", 2) != 2:
+                allowed.append(2)
+            if requested not in allowed:
+                if not allowed:
+                    raise ValueError(
+                        "No supported market filling policy for this broker symbol"
+                    )
+                request["type_filling"] = allowed[0]
+        if (
+            pending
+            and hasattr(info, "expiration_mode")
+            and not info.expiration_mode & 4
+        ):
+            if info.expiration_mode & 1:
+                request["type_time"] = self.mt.ORDER_TIME_GTC
+                request.pop("expiration", None)
+            else:
+                raise ValueError(
+                    "Broker symbol does not support configured pending expiration"
+                )
         self.preflight(request)
         return request
 
@@ -244,13 +302,38 @@ class PlatformBroker(MT5Broker):
     def preflight(self, request):
         result = self.mt.order_check(request)
         if result is None or result.retcode != 0:
-            raise ValueError("Broker preflight rejected request")
+            raise ValueError(
+                f"Broker preflight rejected request: code={getattr(result, 'retcode', 'none')}, {getattr(result, 'comment', 'no broker comment')}"
+            )
 
     def submit(self, request):
         result = self.mt.order_send(request)
         accepted = {self.mt.TRADE_RETCODE_DONE}
         if request["action"] == self.mt.TRADE_ACTION_PENDING:
             accepted.add(self.mt.TRADE_RETCODE_PLACED)
+        if result is not None and result.retcode in {
+            10004,
+            10006,
+            10007,
+            10013,
+            10014,
+            10015,
+            10016,
+            10017,
+            10018,
+            10019,
+            10020,
+            10021,
+            10022,
+            10024,
+            10026,
+            10027,
+            10030,
+        }:
+            return {
+                "state": "rejected",
+                "detail": f"Broker rejected request: code={result.retcode}, {getattr(result, 'comment', 'no broker comment')}",
+            }
         if result is None or result.retcode not in accepted:
             return {
                 "state": "uncertain",
@@ -259,7 +342,9 @@ class PlatformBroker(MT5Broker):
             }
         return {
             "state": "executed",
-            "detail": "Broker confirmed request",
+            "detail": "Broker accepted pending order; waiting for price trigger"
+            if request["action"] == self.mt.TRADE_ACTION_PENDING
+            else "Broker confirmed request",
             "ticket": int(result.order),
         }
 

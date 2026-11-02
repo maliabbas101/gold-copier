@@ -1,3 +1,5 @@
+> Trader alert/CMP update: see [README signal examples and missed-entry diagnostics](../README.md#trader-signal-formats-cmp-and-later-updates). Untyped entries now use AUTO; TP/BE may be supplied later.
+
 # Multiple instruments and the official Exness API
 
 Implemented on `feature/community-platform`. The existing MT5 path remains supported; Exness direct API accounts are a separate connector.

@@ -144,6 +144,7 @@ class Resolve(Model):
 
 class Checkout(Model):
     plan: Literal["basic", "pro"]
+    return_to: Literal["billing", "community"] = "billing"
 
 
 class ResetRequest(Model):
@@ -177,3 +178,28 @@ class ExnessAccountInput(Model):
     private_key: str = Field(min_length=64, max_length=4096)
     gateway: str = Field(min_length=10, max_length=300)
     consent: Literal[True]
+
+
+class CommunityInput(Model):
+    name: str = Field(min_length=2, max_length=60)
+    discord_channel: str = Field(default="", max_length=300)
+    access_mode: Literal["manual", "stripe"] = "manual"
+    monthly_cents: int = Field(default=2500, ge=100, le=1000000)
+
+
+class CommunityGrant(Model):
+    enabled: bool
+    days: int = Field(default=30, ge=1, le=366)
+
+
+class ExistingSource(Model):
+    account_id: str
+    consent: Literal[True]
+
+
+class CommunityChannel(Model):
+    discord_channel: str = Field(max_length=300)
+
+
+class HostingStatus(Model):
+    error: str = Field(min_length=1, max_length=300)

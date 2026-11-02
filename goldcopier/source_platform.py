@@ -18,6 +18,10 @@ def configure_source(store, user_id, body):
     with store.db() as db:
         db.execute("BEGIN IMMEDIATE")
         a = store.account(user_id, body["account_id"], db)
+        if db.execute(
+            "SELECT 1 FROM community_bots WHERE account_id=?", (a["id"],)
+        ).fetchone():
+            raise ValueError("A subscriber child bot cannot become a master parent bot")
         analyst = db.execute(
             "SELECT * FROM analysts WHERE id=?", (body["analyst_id"],)
         ).fetchone()

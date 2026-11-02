@@ -17,7 +17,7 @@ async function setup(authenticated=false,configOverrides={},dashboardOverride=nu
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
  w.HTMLDialogElement.prototype.close=function(){this.open=false};
  w.HTMLElement.prototype.scrollIntoView=function(){};
- w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false,...configOverrides};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=dashboardOverride||sample.dashboard;else if(url.startsWith('/api/portfolio/equity'))body={points:(dashboardOverride||sample.dashboard).equity||[]};else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
+ w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false,...configOverrides};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=dashboardOverride||sample.dashboard;else if(url==='/api/community')body={masters:[],memberships:[],master_license_active:true,payments_enabled:false,managed_available:false,payment_ready:false};else if(url.startsWith('/api/portfolio/equity'))body={points:(dashboardOverride||sample.dashboard).equity||[]};else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
  w.eval(source);await tick();return {dom,w,calls};
 }
 
@@ -34,7 +34,7 @@ test('user-supplied labels render as text instead of executable markup',async()=
 
 test('authenticated risk form sends validated numeric settings with CSRF token',async()=>{const{dom,w,calls}=await setup(true);try{w.location.hash='risk';await tick();const f=w.document.querySelector('#risk-form');f.querySelector('[name="risk_pct"]').value='0.7';f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();const call=calls.find(c=>c.opt.method==='PUT');assert.ok(call);const body=JSON.parse(call.opt.body);assert.equal(body.risk_pct,.7);assert.equal(body.be_enabled,true);assert.equal(body.respect_manual_stops,true);assert.equal(call.opt.headers['X-CSRF-Token'],'csrf-test');assert.match(w.document.querySelector('#toast').textContent,/saved/)}finally{dom.window.close()}});
 
-test('authenticated home and sign-in routes preserve the workspace session',async()=>{const{dom,w}=await setup(true);try{for(const page of ['home','login','signup','demo']){w.location.hash=page;await tick();await tick();assert.equal(w.location.hash,'#overview');assert.ok(w.document.querySelector('.shell'));assert.ok(!w.document.querySelector('#login-form'))}assert.equal(w.document.querySelector('.brand').getAttribute('href'),'#overview');assert.ok(w.document.querySelector('.top-right [data-action="logout"]'));assert.ok(w.document.querySelector('.top-right [aria-label="Open profile"]'))}finally{dom.window.close()}});
+test('authenticated home and sign-in routes preserve the workspace session',async()=>{const{dom,w}=await setup(true);try{for(const page of ['home','login','signup','demo']){w.location.hash=page;await tick();await tick();assert.equal(w.location.hash,'#community');assert.ok(w.document.querySelector('.shell'));assert.ok(!w.document.querySelector('#login-form'))}assert.equal(w.document.querySelector('.brand').getAttribute('href'),'#community');assert.ok(w.document.querySelector('.top-right [data-action="logout"]'));assert.ok(w.document.querySelector('.top-right [aria-label="Open profile"]'))}finally{dom.window.close()}});
 
 test('password visibility toggles without submitting or losing the password',async()=>{const{dom,w,calls}=await setup();try{w.location.hash='login';await tick();const input=w.document.querySelector('#password'),toggle=w.document.querySelector('[data-action="toggle-password"]');input.value='secret-password';toggle.click();await tick();assert.equal(input.type,'text');assert.equal(toggle.getAttribute('aria-label'),'Hide password');assert.equal(toggle.getAttribute('aria-pressed'),'true');toggle.click();await tick();assert.equal(input.type,'password');assert.equal(input.value,'secret-password');assert.ok(!calls.some(c=>c.url==='/api/auth/login'))}finally{dom.window.close()}});
 
@@ -332,4 +332,76 @@ test('trader account setup stops requiring a followed analyst',async()=>{
   assert.equal(w.document.querySelector('#connect-analyst').required,false);
   assert.equal(w.document.querySelector('#connect-analyst').disabled,true);
  }finally{sample.user.role=oldRole;dom.window.close()}
+});
+
+
+test('master community setup uses ordinary web fields and creates a parent bot',async()=>{
+ const state={masters:[],memberships:[],master_license_active:true,payments_enabled:false,managed_available:true,payment_ready:false};
+ const{dom,w,calls}=await setup(true,{demo:false});
+ try{
+  const original=w.fetch;w.fetch=async(url,opt={})=>{
+   if(url==='/api/community')return{ok:true,status:200,json:async()=>structuredClone(state)};
+   if(url==='/api/communities'&&opt.method==='POST'){
+    calls.push({url,opt});const body=JSON.parse(opt.body);state.masters=[{id:'parent-a',name:body.name,licensed:true,enabled:1,access_mode:'manual',monthly_cents:body.monthly_cents,invite_url:'https://copier.example/#join/master-invite',source:null,members:[]}];
+    return{ok:true,status:200,json:async()=>({id:'parent-a'})};
+   }
+   return original(url,opt);
+  };
+  w.location.hash='community';await tick();w.document.querySelector('[data-action="community-create"]').click();await tick();
+  const f=w.document.querySelector('#community-create-form');assert.ok(f);
+  assert.ok(!f.querySelector('[name="guild_id"], [name="trader_id"], [name="AGENT_TOKEN"]'));
+  f.elements.namedItem('name').value='Adi community';f.elements.namedItem('discord_channel').value='https://discord.com/channels/123/456';
+  f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  const call=calls.find(c=>c.url==='/api/communities');assert.ok(call);
+  assert.equal(JSON.parse(call.opt.body).monthly_cents,2500);
+  assert.match(w.document.querySelector('h1').textContent,/Master dashboard/);
+  assert.match(w.document.querySelector('.content').textContent,/parent bot/);
+  assert.ok(w.document.querySelector('[data-action="community-copy-invite"]'));
+ }finally{dom.window.close()}
+});
+
+
+test('subscriber connects a generated child bot without choosing analyst IDs or installing workers',async()=>{
+ const state={masters:[],memberships:[{community_id:'parent-a',name:'Adi community',active:true,status:'granted',access_mode:'manual',bot:{id:'child-b',account_id:null}}],master_license_active:false,payments_enabled:false,managed_available:true,payment_ready:false};
+ const{dom,w,calls}=await setup(true,{demo:false});
+ try{
+  const original=w.fetch;w.fetch=async(url,opt={})=>url==='/api/community'?{ok:true,status:200,json:async()=>structuredClone(state)}:original(url,opt);
+  w.location.hash='community';await tick();assert.match(w.document.querySelector('.content').textContent,/personal child bot has been generated/);
+  w.document.querySelector('[data-action="community-connect-child"]').click();await tick();
+  const f=w.document.querySelector('#community-broker-form');assert.ok(f);
+  assert.ok(!f.querySelector('[name="analyst_id"], [name="AGENT_TOKEN"], [name="hosting"]'));
+  f.elements.namedItem('login').value='222222';f.elements.namedItem('server').value='Broker-Demo';f.elements.namedItem('password').value='private-password';
+  f.querySelector('#community-consent').checked=true;
+  f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  const call=calls.find(c=>c.url==='/api/communities/parent-a/child-bot');assert.ok(call);
+  const body=JSON.parse(call.opt.body);assert.equal(body.login,'222222');assert.equal(body.consent,true);
+  assert.equal(body.analyst_id,undefined);assert.equal(body.community_id,undefined);
+ }finally{dom.window.close()}
+});
+
+
+test('public subscriber invite preserves its master through signup',async()=>{
+ const{dom,w}=await setup();
+ try{
+  w.location.hash='login';await tick();
+  const original=w.fetch;w.fetch=async(url,opt={})=>url==='/api/communities/invites/invite-a'?{ok:true,status:200,json:async()=>({id:'parent-a',name:'Adi signals',access_mode:'manual',monthly_cents:2500})}:original(url,opt);
+  w.location.hash='join/invite-a';await tick();
+  assert.match(w.document.querySelector('h1').textContent,/Adi signals/);
+  assert.equal(w.localStorage.getItem('gold-community-invite'),'invite-a');
+  assert.ok(w.document.querySelector('a[href="#signup"]'));
+  assert.ok(!w.document.querySelector('[data-action="source-setup"]'));
+ }finally{dom.window.close()}
+});
+
+
+test('late community responses cannot restore master data after logout',async()=>{
+ const{dom,w}=await setup(true,{demo:false});
+ try{
+  const original=w.fetch;let release;
+  w.fetch=async(url,opt={})=>url==='/api/community'?new Promise(resolve=>{release=resolve}):original(url,opt);
+  w.location.hash='community';await tick();assert.ok(release);
+  w.document.querySelector('.top-right [data-action="logout"]').click();await tick();
+  release({ok:true,status:200,json:async()=>({masters:[{name:'Private master data'}],memberships:[]})});await tick();
+  assert.equal(w.location.hash,'#login');assert.ok(!w.document.body.textContent.includes('Private master data'));
+ }finally{dom.window.close()}
 });

@@ -476,7 +476,7 @@ def create_app():
 
     @app.post("/api/billing/checkout")
     def checkout(body: M.Checkout, current=Depends(user)):
-        return {"url": billing.checkout(current, body.plan)}
+        return {"url": billing.checkout(current, body.plan, body.return_to)}
 
     @app.post("/api/billing/portal")
     def portal(current=Depends(user)):
@@ -520,9 +520,18 @@ def create_app():
 
         with store.db() as db:
             source = source_config(db, a["id"])
+            child = db.execute(
+                "SELECT b.id child_id,c.id parent_id,c.name master_name FROM community_bots b JOIN communities c ON c.id=b.community_id WHERE b.account_id=?",
+                (a["id"],),
+            ).fetchone()
+            parent = db.execute(
+                "SELECT c.id parent_id,c.name master_name FROM communities c JOIN master_sources s ON s.analyst_id=c.analyst_id WHERE s.account_id=?",
+                (a["id"],),
+            ).fetchone()
         return {
             "purpose": a.get("purpose", "follower"),
             "master_source": source,
+            "bot_context": dict(child) if child else dict(parent) if parent else None,
             "account_id": a["id"],
             "hosting": a["hosting"],
             "connector": a.get("connector", "mt5"),
@@ -592,6 +601,9 @@ def create_app():
     @app.post("/api/worker/heartbeat")
     def heartbeat(body: M.Snapshot, a=Depends(agent)):
         store.heartbeat(a, body.model_dump())
+        from .community import auto_start
+
+        auto_start(store, a["id"], paid, live)
         return {"ok": True}
 
     @app.post("/api/worker/claim")
@@ -764,9 +776,32 @@ def create_app():
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT id,user_id,name,mode,heartbeat FROM accounts WHERE hosting='managed' AND secret IS NOT NULL"
+                    "SELECT id,user_id,name,mode,heartbeat,connector,hosting FROM accounts WHERE hosting IN ('managed','managed_api') AND secret IS NOT NULL AND disconnected=0"
                 )
             ]
+
+    @app.post(
+        "/api/supervisor/accounts/{account_id}/status",
+        dependencies=[Depends(supervisor)],
+    )
+    def hosting_status(account_id: str, body: M.HostingStatus):
+        with store.db() as db:
+            a = db.execute(
+                "SELECT * FROM accounts WHERE id=? AND hosting IN ('managed','managed_api')",
+                (account_id,),
+            ).fetchone()
+            if not a:
+                raise ValueError("Hosted account not found")
+            snap = json.loads(a["snapshot"] or "{}")
+            snap["error"] = body.error
+            if a["purpose"] == "master":
+                snap["source_status"] = body.error
+            db.execute(
+                "UPDATE accounts SET enabled=0,heartbeat=0,snapshot=? WHERE id=?",
+                (json.dumps(snap), account_id),
+            )
+            store.event(db, a["user_id"], "alert", body.error, account_id)
+        return {"ok": True}
 
     @app.post(
         "/api/supervisor/accounts/{account_id}/token",
@@ -775,12 +810,16 @@ def create_app():
     def assignment_token(account_id: str):
         with store.db() as db:
             a = db.execute(
-                "SELECT user_id FROM accounts WHERE id=? AND hosting='managed' AND secret IS NOT NULL",
+                "SELECT user_id FROM accounts WHERE id=? AND hosting IN ('managed','managed_api') AND secret IS NOT NULL AND disconnected=0",
                 (account_id,),
             ).fetchone()
         if not a:
             raise ValueError("Managed assignment not found")
         return {"token": store.rotate_agent(a["user_id"], account_id)}
+
+    from .community_routes import install as install_community_routes
+
+    install_community_routes(app, store, vault, billing, base, user, paid, live, demo)
 
     @app.get("/")
     def index():

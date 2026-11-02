@@ -43,6 +43,9 @@ class PlatformStore:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS equity_account_time ON equity(account_id,created,id)"
             )
+            from .community import migrate as migrate_communities
+
+            migrate_communities(db)
             from .instruments import migrate
 
             migrate(db)
@@ -145,7 +148,7 @@ class PlatformStore:
             raise ValueError("Account not found")
         return dict(row)
 
-    def add_account(self, user, data, vault):
+    def add_account(self, user, data, vault, community_id=None):
         account_id = uid()
         analyst_id = data.pop("analyst_id", None)
         purpose = data.get("purpose", "follower")
@@ -158,6 +161,14 @@ class PlatformStore:
             raise ValueError("Managed hosting requires the MT5 trading password")
         secret = vault.encrypt(password, account_id) if password else None
         with self.db() as db:
+            if analyst_id:
+                private = db.execute(
+                    "SELECT id FROM communities WHERE analyst_id=?", (analyst_id,)
+                ).fetchone()
+                if private and private["id"] != community_id:
+                    raise ValueError(
+                        "Join this master's community and create your personal copy bot there"
+                    )
             if (
                 analyst_id
                 and not db.execute(
@@ -183,7 +194,8 @@ class PlatformStore:
                 ),
             )
             db.execute(
-                "UPDATE accounts SET purpose=? WHERE id=?", (purpose, account_id)
+                "UPDATE accounts SET purpose=?,connector=? WHERE id=?",
+                (purpose, data.get("connector", "mt5"), account_id),
             )
             pair = (
                 "XAUUSD"
@@ -281,6 +293,10 @@ class PlatformStore:
                 "UPDATE pjobs SET state='cancelled' WHERE account_id=? AND state='queued'",
                 (account_id,),
             )
+            db.execute(
+                "UPDATE community_bots SET auto_start=desired_enabled WHERE account_id=?",
+                (account_id,),
+            )
             self.event(
                 db, user, "security", "Worker token rotated; copying paused", account_id
             )
@@ -317,7 +333,12 @@ class PlatformStore:
                     "SELECT 1 FROM follows WHERE account_id=?", (account_id,)
                 ).fetchone():
                     raise ValueError("Follow an analyst before starting")
-                if billing:
+                from .community import entry_access
+
+                entitled, reason = entry_access(db, account_id, billing)
+                if entitled is False:
+                    raise ValueError(reason)
+                if billing and entitled is None:
                     sub = db.execute(
                         "SELECT status,period_end FROM subscriptions WHERE user_id=?",
                         (user,),
@@ -336,6 +357,10 @@ class PlatformStore:
                     raise ValueError("Reconcile unresolved commands before starting")
             db.execute(
                 "UPDATE accounts SET enabled=? WHERE id=?", (int(enabled), account_id)
+            )
+            db.execute(
+                "UPDATE community_bots SET desired_enabled=?,auto_start=0 WHERE account_id=?",
+                (int(enabled), account_id),
             )
             if not enabled:
                 db.execute(
@@ -397,7 +422,24 @@ class PlatformStore:
                     (account_id,),
                 ).fetchone():
                     raise ValueError("Reconcile in-flight commands before unfollowing")
+            child_parent = db.execute(
+                "SELECT c.analyst_id FROM community_bots b JOIN communities c ON c.id=b.community_id WHERE b.account_id=?",
+                (account_id,),
+            ).fetchone()
+            if enabled and child_parent and child_parent["analyst_id"] != analyst_id:
+                raise ValueError("Your child bot follows its parent master only")
             if enabled:
+                private = db.execute(
+                    "SELECT id FROM communities WHERE analyst_id=?", (analyst_id,)
+                ).fetchone()
+                if (
+                    private
+                    and not db.execute(
+                        "SELECT 1 FROM community_bots WHERE account_id=? AND community_id=? AND user_id=?",
+                        (account_id, private["id"], user),
+                    ).fetchone()
+                ):
+                    raise ValueError("Use your personal copy bot for this master")
                 db.execute(
                     "INSERT OR IGNORE INTO follows(account_id,analyst_id) VALUES(?,?)",
                     (account_id, analyst_id),
@@ -493,6 +535,17 @@ class PlatformStore:
                 ).fetchone()
             ):
                 raise ValueError("Trader source is paused, disconnected, or unbound")
+            from .community import master_licensed
+
+            private_master = db.execute(
+                "SELECT owner_id FROM communities WHERE analyst_id=?", (analyst_id,)
+            ).fetchone()
+            if (
+                private_master
+                and any(item["action"] == "entry" for item in parsed)
+                and not master_licensed(db, private_master["owner_id"], billing)
+            ):
+                raise ValueError("Master software subscription is inactive")
             payloads = []
             for item in parsed:
                 payload = {**item, "origin": "analyst"}
@@ -638,7 +691,43 @@ class PlatformStore:
                                 }
                             )
                             continue
-                        if billing:
+                        from .community import entry_access
+
+                        entitled, entitlement_reason = entry_access(
+                            db, a["id"], billing
+                        )
+                        private_feed = db.execute(
+                            "SELECT id FROM communities WHERE analyst_id=?",
+                            (analyst_id,),
+                        ).fetchone()
+                        if (
+                            private_feed
+                            and not db.execute(
+                                "SELECT 1 FROM community_bots WHERE account_id=? AND community_id=?",
+                                (a["id"], private_feed["id"]),
+                            ).fetchone()
+                        ):
+                            entitled, entitlement_reason = (
+                                False,
+                                "This account is not a child bot of this master",
+                            )
+                        if entitled is False:
+                            self.event(
+                                db,
+                                a["user_id"],
+                                "subscription",
+                                entitlement_reason,
+                                a["id"],
+                            )
+                            skipped.append(
+                                {
+                                    "account_id": a["id"],
+                                    "pair": payload["symbol"],
+                                    "reason": entitlement_reason,
+                                }
+                            )
+                            continue
+                        if billing and entitled is None:
                             sub = db.execute(
                                 "SELECT * FROM subscriptions WHERE user_id=?",
                                 (a["user_id"],),
@@ -863,7 +952,16 @@ class PlatformStore:
                 == "true"
             )
             can_enter = bool(current["enabled"]) and not paused
-            if billing:
+            from .community import entry_access
+
+            entitled, _ = entry_access(db, a["id"], billing)
+            if entitled is False:
+                can_enter = False
+                db.execute(
+                    "UPDATE pjobs SET state='cancelled' WHERE account_id=? AND state='queued' AND json_extract(payload,'$.action')='entry'",
+                    (a["id"],),
+                )
+            if billing and entitled is None:
                 sub = db.execute(
                     "SELECT * FROM subscriptions WHERE user_id=?", (a["user_id"],)
                 ).fetchone()
@@ -1001,6 +1099,11 @@ class PlatformStore:
                     (a["id"],),
                 ).fetchone()
                 a["master_source"] = dict(source) if source else None
+                child = db.execute(
+                    "SELECT id,community_id FROM community_bots WHERE account_id=?",
+                    (a["id"],),
+                ).fetchone()
+                a["child_bot"] = dict(child) if child else None
                 a["pairs"] = [
                     dict(m)
                     for m in db.execute(
@@ -1019,7 +1122,8 @@ class PlatformStore:
             analysts = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT id,name,description,active,source_mode FROM analysts"
+                    "SELECT n.id,n.name,n.description,n.active,n.source_mode FROM analysts n LEFT JOIN communities c ON c.analyst_id=n.id WHERE c.id IS NULL OR c.owner_id=? OR EXISTS(SELECT 1 FROM community_memberships m WHERE m.community_id=c.id AND m.user_id=?)",
+                    (user, user),
                 )
             ]
             jobs = [
@@ -1067,7 +1171,20 @@ class PlatformStore:
             from .instruments import registry
 
             pairs = registry(db)
+        with self.db() as db:
+            persona = (
+                "master"
+                if db.execute(
+                    "SELECT 1 FROM communities WHERE owner_id=?", (user,)
+                ).fetchone()
+                else "subscriber"
+                if db.execute(
+                    "SELECT 1 FROM community_memberships WHERE user_id=?", (user,)
+                ).fetchone()
+                else "legacy"
+            )
         return {
+            "persona": persona,
             "pairs": pairs,
             "accounts": accounts,
             "analysts": analysts,

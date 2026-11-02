@@ -2,7 +2,19 @@
 
 Trade once on a trader's MT5 or eligible Exness API account. The copier sends protected new fills directly to followers and posts Discord logs separately. **You do not enter each trade in Discord and then in the operator console.**
 
-## Recommended setup: broker → copier → followers
+## Start here: one master, many subscribers
+
+**A (master)** buys the software, opens **Community**, creates their parent bot, connects their master trading account, authorizes their Discord output channel, and shares a subscriber invite. A trades normally in MT5; each new protected fill creates a Discord signal and directly queues copies for active subscribers.
+
+**B (copy trader)** opens A's invite, signs up, subscribes (or receives A's explicit access approval), and connects their broker account. Their private child bot is generated automatically and starts after a healthy hosted connection. Each B keeps their own credentials, account and risk limits. There is no per-trade Discord entry or operator-console submission.
+
+The service operator provisions hosted execution capacity, payment configuration and the Discord app once. A and B use the web app; they do not install workers or manage tokens. **This branch implements the product flow; live hosting, provider credentials and broker acceptance still need deployment and a demo-account acceptance run.** See [community setup and deployment](docs/COMMUNITIES.md).
+
+The authenticated frontend opens at `http://127.0.0.1:8001/#community` when using the local runtime below. Source code changes alone do not create a public hosted frontend URL.
+
+## Advanced local setup: broker → copier → followers
+
+The following operator workflow is retained for local testing and existing installations. New master communities use the Community onboarding above.
 
 1. **Install** using the Windows instructions below for MT5. Start `python -m goldcopier.manage run`, then sign in to the local frontend. The direct Exness API worker can run without Windows/MT5. Source and follower accounts must be separate.
 2. In **Accounts**, connect the trader's account and choose **Trader source — read-only observation**. An operator may also convert their own paused follower account through source setup if it has no copier-owned exposure or unresolved work. Use the master terminal's saved login or a read-only/investor password where possible. Eligible direct Exness source keys should have read-only scopes.

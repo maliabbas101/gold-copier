@@ -16,6 +16,29 @@ from urllib.parse import urlparse
 import httpx
 
 
+def worker_environment(base, token, terminal):
+    blocked = {
+        "SUPERVISOR_TOKEN",
+        "SIGNAL_INGEST_TOKEN",
+        "VAULT_KEY",
+        "PLATFORM_DB",
+        "MT5_PASSWORD",
+        "TEST_DISCORD_BOT_TOKEN",
+    }
+    env = {
+        k: v
+        for k, v in base.items()
+        if k not in blocked
+        and not k.startswith(("STRIPE_", "SMTP_", "ADMIN_", "MASTER_", "DISCORD_"))
+    }
+    env.update(
+        AGENT_TOKEN=token,
+        MT5_TERMINAL_PATH=terminal or "",
+        WORKER_STATE="platform-worker.db",
+    )
+    return env
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
     url = os.environ["COPIER_URL"].rstrip("/")
@@ -25,7 +48,7 @@ def main():
     ):
         raise ValueError("HTTPS required outside localhost")
     pool = Path(os.environ.get("TERMINAL_POOL", "terminal-pool.json"))
-    slots = json.loads(pool.read_text())["terminals"]
+    slots = json.loads(pool.read_text())["terminals"] if pool.exists() else []
     if len(set(slots)) != len(slots):
         raise ValueError("Terminal slots must use distinct installations")
     lock = pool.with_suffix(".lock")
@@ -33,6 +56,7 @@ def main():
     state = Path(os.environ.get("POOL_STATE", "pool-state"))
     state.mkdir(parents=True, exist_ok=True)
     children = {}
+    reported_failures = set()
     # Preserve account-to-terminal binding across restarts. Credentials/tokens stay out of this file.
     binding_file = state / "bindings.json"
     bindings = json.loads(binding_file.read_text()) if binding_file.exists() else {}
@@ -50,10 +74,24 @@ def main():
                     active = {a["id"] for a in assignments}
                     for ident, child in list(children.items()):
                         if ident not in active:
-                            child.terminate()
+                            if child.poll() is None:
+                                child.terminate()
                             child.wait(timeout=20)
                             children.pop(ident)
+                            bindings.pop(ident, None)
+                            temporary = binding_file.with_suffix(".tmp")
+                            temporary.write_text(json.dumps(bindings))
+                            temporary.replace(binding_file)
                         elif child.poll() is not None:
+                            if ident not in reported_failures:
+                                response = client.post(
+                                    f"/api/supervisor/accounts/{ident}/status",
+                                    json={
+                                        "error": "Broker connection needs attention. Check the account login, server and password, or contact the service team."
+                                    },
+                                )
+                                response.raise_for_status()
+                                reported_failures.add(ident)
                             logging.error(
                                 "Worker %s stopped; operator must reconcile before restarting supervisor",
                                 ident,
@@ -65,11 +103,12 @@ def main():
                         # Never steal an apparently running assignment, even after a supervisor restart.
                         if a["heartbeat"] and time.time() - a["heartbeat"] < 60:
                             continue
-                        slot = bindings.get(a["id"])
+                        api_account = a.get("connector") == "exness"
+                        slot = None if api_account else bindings.get(a["id"])
                         occupied = set(bindings.values())
-                        if slot is None:
+                        if slot is None and not api_account:
                             slot = next((s for s in slots if s not in occupied), None)
-                        if slot is None:
+                        if slot is None and not api_account:
                             logging.warning(
                                 "No free terminal slot for account %s", a["id"]
                             )
@@ -87,19 +126,15 @@ def main():
                         )
                         response.raise_for_status()
                         token = response.json()["token"]
-                        env = {
-                            **os.environ,
-                            "AGENT_TOKEN": token,
-                            "MT5_TERMINAL_PATH": slot,
-                            "WORKER_STATE": "platform-worker.db",
-                        }
+                        env = worker_environment(os.environ, token, slot)
                         # Pool and per-worker logs are operator-managed; never print credentials.
                         children[a["id"]] = subprocess.Popen(
                             [sys.executable, "-m", "goldcopier.platform_agent"],
                             cwd=directory,
                             env=env,
                         )
-                        bindings[a["id"]] = slot
+                        if not api_account:
+                            bindings[a["id"]] = slot
                         temporary = binding_file.with_suffix(".tmp")
                         temporary.write_text(json.dumps(bindings))
                         temporary.replace(binding_file)

@@ -23,7 +23,7 @@ class Billing:
         ):
             raise ValueError("Billing is not configured by the operator")
 
-    def checkout(self, user, plan):
+    def checkout(self, user, plan, return_to="billing"):
         self.ready()
         with self.store.db() as db:
             row = db.execute(
@@ -51,8 +51,10 @@ class Billing:
             customer=customer,
             mode="subscription",
             line_items=[{"price": self.prices[plan], "quantity": 1}],
-            success_url=self.base_url + "/#billing",
-            cancel_url=self.base_url + "/#billing",
+            success_url=self.base_url
+            + ("/#community" if return_to == "community" else "/#billing"),
+            cancel_url=self.base_url
+            + ("/#community" if return_to == "community" else "/#billing"),
             subscription_data={"metadata": {"user_id": user["id"]}},
             api_key=self.key,
         )
@@ -73,6 +75,10 @@ class Billing:
     def webhook(self, payload, signature):
         self.ready()
         event = stripe.Webhook.construct_event(payload, signature, self.secret)
+        from .community_billing import CommunityBilling
+
+        if CommunityBilling(self).handle(event):
+            return
         with self.store.db() as db:
             if db.execute(
                 "SELECT 1 FROM webhook_events WHERE id=?", (event.id,)

@@ -4,6 +4,9 @@ This implementation uses the public descriptions of Inspired Analyst Bot as a fu
 
 | Publicly described capability | This branch |
 | --- | --- |
+| Master → subscriber product | Community onboarding, scoped master dashboard, invite signup, subscription access, generated private child bots; see [deployment](COMMUNITIES.md) |
+| Master subscriber billing | Stripe Connect hosted onboarding/checkout/portal with signed webhook verification; live provider setup required |
+| Authorized Discord output | Master authorizes a server they manage through OAuth; copying runs independently of Discord output |
 | Website, sign-in, member dashboard | Implemented; bundled frontend and authenticated API |
 | Connect individual MT5 accounts | Implemented; consent, verification, token isolation, managed or self-hosted worker |
 | Cloud account execution without member VPS setup | Managed terminal pool implemented; operator must supply and supervise Windows capacity |

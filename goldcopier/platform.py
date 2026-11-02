@@ -274,7 +274,26 @@ def create_app():
 
     @app.get("/api/dashboard")
     def dashboard(current=Depends(user)):
-        return store.dashboard(current["id"])
+        return {**store.dashboard(current["id"]), "server_time": time.time()}
+
+    @app.get("/api/portfolio/stream")
+    async def portfolio_stream(request: Request, current=Depends(user)):
+        from .portfolio import portfolio_events
+
+        return StreamingResponse(
+            portfolio_events(
+                store, request, request.cookies.get("gold_session", ""), current["id"]
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/portfolio/equity")
+    def portfolio_equity(account_id: str, period: str = "LIVE", current=Depends(user)):
+        return {
+            "points": store.equity_history(current["id"], account_id, period),
+            "server_time": time.time(),
+        }
 
     @app.get("/api/pairs")
     def pairs(current=Depends(user)):

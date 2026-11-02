@@ -32,3 +32,5 @@ Automated tests verify application behavior with fake broker/provider responses.
 The multi-instrument / direct API update supersedes the original gold-only limitations. See [INSTRUMENTS_AND_EXNESS.md](INSTRUMENTS_AND_EXNESS.md).
 
 Trader APP templates, optional later TP/BE, half-risk split entries, referenced/reply updates and informational status messages are covered by [README examples](../README.md#trader-signal-formats-cmp-and-later-updates).
+
+Live portfolio: one-second authenticated browser stream with polling fallback, broker snapshot/current-price updates, a rolling live equity chart, account-specific history, stale-data indicators, and preservation of open dialogs/search. See [live portfolio setup](../README.md#live-portfolio-and-trade-updates).

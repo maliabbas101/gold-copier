@@ -7,16 +7,17 @@ const source=fs.readFileSync(path.join(__dirname,'../goldcopier/web/app.js'),'ut
 const html=fs.readFileSync(path.join(__dirname,'../docs/frontend-preview.html'),'utf8');
 const sample=JSON.parse(html.match(/if\(path==="\/demo"\) return ([\s\S]*?); if\(path==="\/dashboard"\)/)[1]);
 const tick=()=>new Promise(r=>setTimeout(r,25));
-async function setup(authenticated=false,configOverrides={},dashboardOverride=null){
+async function setup(authenticated=false,configOverrides={},dashboardOverride=null,streaming=false){
  const calls=[];
  const dom=new JSDOM('<div id="app"></div><div id="toast"></div><dialog id="modal"></dialog>',{url:authenticated?'http://localhost/#overview':'http://localhost/#demo',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window;
+ if(streaming){w.portfolioSources=[];w.EventSource=class{constructor(url){this.url=url;this.handlers={};w.portfolioSources.push(this);}addEventListener(name,fn){this.handlers[name]=fn;}close(){this.closed=true;}emit(name,data){this.handlers[name]?.({data:JSON.stringify(data)});}};}
  // Keep seeded chart fixtures within their intended time window on any test date.
  w.Date.now=()=>Math.max(...sample.dashboard.equity.map(p=>p.created))*1000+60000;
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
  w.HTMLDialogElement.prototype.close=function(){this.open=false};
  w.HTMLElement.prototype.scrollIntoView=function(){};
- w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false,...configOverrides};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=dashboardOverride||sample.dashboard;else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
+ w.fetch=async(url,opt={})=>{calls.push({url,opt});let body;if(url==='/api/config')body={demo:true,live_enabled:false,billing_enabled:false,billing_ready:false,...configOverrides};else if(url==='/api/demo')body=sample;else if(url==='/api/dashboard')body=dashboardOverride||sample.dashboard;else if(url.startsWith('/api/portfolio/equity'))body={points:(dashboardOverride||sample.dashboard).equity||[]};else if(url==='/api/auth/me'&&authenticated)body={user:sample.user,csrf:'csrf-test'};else if(authenticated&&opt.method&&opt.method!=='GET')body={ok:true};else return {ok:false,status:401,json:async()=>({detail:'Sign in'})};return {ok:true,status:200,json:async()=>structuredClone(body)}};
  w.eval(source);await tick();return {dom,w,calls};
 }
 
@@ -157,4 +158,130 @@ test('signal intake offers an explicit CMP template without silently queueing it
   assert.equal(confirm.checked,false);
   assert.ok(!calls.some(c=>c.url==='/api/operator/signals'));
  }finally{sample.user.role=oldRole;dom.window.close()}
+});
+
+
+test('portfolio stream updates prices, P&L, orders and equity without replacing an open dialog',async()=>{
+ const dashboard=structuredClone(sample.dashboard),a=dashboard.accounts[0],now=Date.now()/1000;
+ a.heartbeat=now;a.snapshot.error=null;
+ dashboard.equity=[{account_id:a.id,created:now-20,equity:10000},{account_id:a.id,created:now-10,equity:10010}];
+ const{dom,w}=await setup(true,{demo:false},dashboard,true);
+ try{
+  const stream=w.portfolioSources[0];assert.ok(stream);stream.onopen();
+  w.location.hash='trades';await tick();
+  w.document.querySelector('[data-action="manage"]').click();await tick();
+  const dialog=w.document.querySelector('#modal'),percent=w.document.querySelector('#percent');percent.value='37';percent.focus();
+  const next=structuredClone(dashboard);next.accounts[0].heartbeat=now+1;next.accounts[0].snapshot.equity=11234.56;
+  next.accounts[0].snapshot.positions[0].price_current=3987.65;next.accounts[0].snapshot.positions[0].profit=123.45;
+  next.accounts[0].snapshot.orders=[{ticket:99,symbol:'EURUSD',type:'BUY LIMIT',volume:.01,price_open:1.0805,copier:true}];
+  delete next.equity;
+  stream.emit('portfolio',{dashboard:next,server_time:now+1});await tick();
+  assert.match(w.document.querySelector('.portfolio-summary').textContent,/11,234.56/);
+  assert.match(w.document.querySelector('.content').textContent,/3,987.65/);
+  assert.match(w.document.querySelector('.content').textContent,/123.45/);
+  assert.match(w.document.querySelector('.content').textContent,/EURUSD/);
+  assert.equal(w.document.querySelector('#modal'),dialog);assert.equal(dialog.open,true);assert.equal(percent.value,'37');
+  assert.equal(w.portfolioSources.length,1);
+ }finally{dom.window.close()}
+});
+
+
+test('stream reconnects, labels stale broker data, and ends when the session expires',async()=>{
+ const dashboard=structuredClone(sample.dashboard),now=Date.now()/1000;
+ dashboard.accounts[0].heartbeat=now-45;dashboard.accounts[0].snapshot.error=null;
+ const{dom,w}=await setup(true,{demo:false},dashboard,true);
+ try{
+  const stream=w.portfolioSources[0];stream.onopen();
+  stream.emit('portfolio',{dashboard:structuredClone(dashboard),server_time:now});await tick();
+  assert.match(w.document.querySelector('[data-live-status]').textContent,/Stale/);
+  stream.onerror();assert.match(w.document.querySelector('[data-live-status]').textContent,/Stale/);
+  const recovered=structuredClone(dashboard);recovered.accounts[0].heartbeat=now;
+  stream.onopen();stream.emit('portfolio',{dashboard:recovered,server_time:now});await tick();
+  assert.match(w.document.querySelector('[data-live-status]').textContent,/Live/);
+  stream.emit('expired',{});await tick();await tick();
+  assert.equal(stream.closed,true);assert.equal(w.location.hash,'#login');assert.ok(!w.document.querySelector('.shell'));
+ }finally{dom.window.close()}
+});
+
+
+test('live chart grows as snapshots arrive and history uses the chosen account and period',async()=>{
+ const dashboard=structuredClone(sample.dashboard),a=dashboard.accounts[0],now=Date.now()/1000;
+ a.snapshot.error=null;a.heartbeat=now;
+ dashboard.equity=[{account_id:a.id,created:now-10,equity:10000},{account_id:a.id,created:now-5,equity:10010}];
+ const{dom,w,calls}=await setup(true,{demo:false},dashboard,true);
+ try{
+  const stream=w.portfolioSources[0];stream.onopen();const before=w.document.querySelector('svg[aria-label="Equity snapshots for selected account"] path[stroke="#58866e"]').getAttribute('d');
+  const next=structuredClone(dashboard);delete next.equity;next.accounts[0].snapshot.equity=10100;next.accounts[0].heartbeat=now+1;
+  stream.emit('portfolio',{dashboard:next,server_time:now+1});await tick();
+  assert.notEqual(w.document.querySelector('svg[aria-label="Equity snapshots for selected account"] path[stroke="#58866e"]').getAttribute('d'),before);
+  w.document.querySelector('[data-period="30D"]').click();await tick();
+  assert.ok(calls.some(c=>c.url.includes(`/portfolio/equity?account_id=${a.id}&period=30D`)));
+  assert.equal(w.document.querySelector('[data-period="30D"]').className,'active');
+ }finally{dom.window.close()}
+});
+
+
+test('trade search keeps its text, focus and filter while a portfolio frame arrives',async()=>{
+ const{dom,w}=await setup(true,{demo:false},null,true);
+ try{
+  w.location.hash='trades';await tick();const search=w.document.querySelector('#trade-search');search.value='executed';search.focus();search.dispatchEvent(new w.Event('input',{bubbles:true}));
+  const stream=w.portfolioSources[0];stream.onopen();stream.emit('portfolio',{dashboard:structuredClone(sample.dashboard)});await tick();
+  assert.equal(w.document.querySelector('#trade-search').value,'executed');assert.equal(w.document.activeElement.id,'trade-search');
+  assert.ok([...w.document.querySelectorAll('#history-table tbody tr')].every(row=>row.hidden===!row.textContent.toLowerCase().includes('executed')));
+ }finally{dom.window.close()}
+});
+
+
+test('hidden tabs close the stream and foreground tabs reconnect without accepting old frames',async()=>{
+ const{dom,w}=await setup(true,{demo:false},null,true);
+ try{
+  const old=w.portfolioSources[0];
+  Object.defineProperty(w.document,'hidden',{configurable:true,value:true});w.document.dispatchEvent(new w.Event('visibilitychange'));
+  assert.equal(old.closed,true);
+  Object.defineProperty(w.document,'hidden',{configurable:true,value:false});w.document.dispatchEvent(new w.Event('visibilitychange'));await tick();
+  assert.equal(w.portfolioSources.length,2);
+  const before=w.document.querySelector('.chart-total').textContent;
+  const stale=structuredClone(sample.dashboard);stale.accounts[0].snapshot.equity=99999999;
+  old.emit('portfolio',{dashboard:stale});await tick();
+  assert.equal(w.document.querySelector('.chart-total').textContent,before);
+ }finally{dom.window.close()}
+});
+
+
+test('polling fallback updates the portfolio when streaming is unavailable',async()=>{
+ const dashboard=structuredClone(sample.dashboard);
+ const{dom,w}=await setup(true,{demo:false},dashboard);
+ try{
+  dashboard.accounts[0].snapshot.equity=12345.67;dashboard.accounts[0].heartbeat=Date.now()/1000;
+  await new Promise(r=>setTimeout(r,1100));
+  assert.match(w.document.querySelector('.chart-total').textContent,/12,345.67/);
+ }finally{dom.window.close()}
+});
+
+
+test('focusing the account selector never freezes live portfolio values',async()=>{
+ const{dom,w}=await setup(true,{demo:false},null,true);
+ try{
+  const select=w.document.querySelector('#account-select');select.focus();
+  const next=structuredClone(sample.dashboard);next.accounts[0].snapshot.equity=15432.10;
+  const stream=w.portfolioSources[0];stream.onopen();stream.emit('portfolio',{dashboard:next});await tick();
+  assert.equal(w.document.querySelector('#account-select'),select);
+  assert.equal(w.document.activeElement,select);
+  assert.match(w.document.querySelector('.chart-total').textContent,/15,432.10/);
+ }finally{dom.window.close()}
+});
+
+
+test('an open trade dialog stays bound to its original account when live account data changes',async()=>{
+ const dashboard=structuredClone(sample.dashboard),originalId=dashboard.accounts[0].id;
+ const{dom,w,calls}=await setup(true,{demo:false},dashboard,true);
+ try{
+  w.location.hash='trades';await tick();w.document.querySelector('[data-action="manage"]').click();await tick();
+  const form=w.document.querySelector('#command-form');assert.equal(form.elements.namedItem('account_id').value,originalId);
+  const next=structuredClone(dashboard);next.accounts[0].id='replacement-account';
+  const stream=w.portfolioSources[0];stream.onopen();stream.emit('portfolio',{dashboard:next});await tick();
+  form.elements.namedItem('action').value='close';form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+  assert.ok(calls.some(c=>c.url===`/api/accounts/${originalId}/commands`));
+  assert.ok(!calls.some(c=>c.url==='/api/accounts/replacement-account/commands'));
+ }finally{dom.window.close()}
 });

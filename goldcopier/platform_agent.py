@@ -452,7 +452,6 @@ def main():
                         "in .env (or the terminal's saved login), then restart the server."
                     )
                 broker = PlatformBroker(cfg, mt)
-            tick = 0
             while True:
                 # Validate the token before software-managed exits. A revoked worker must terminate.
                 try:
@@ -483,19 +482,18 @@ def main():
                     continue
                 monitor(broker, ledger)
                 try:
-                    if tick % 5 == 0:
-                        snap = broker.snapshot()
-                        try:
-                            broker.protection(cfg["risk"], broker.check_account())
-                        except ValueError as exc:
-                            snap["error"] = str(exc)
-                        ledger.save_baseline(broker.baseline)
-                        if ledger.unresolved():
-                            snap["error"] = (
-                                "Uncertain local operation; operator reconciliation required"
-                            )
-                        response = client.post("/api/worker/heartbeat", json=snap)
-                        response.raise_for_status()
+                    snap = broker.snapshot()
+                    try:
+                        broker.protection(cfg["risk"], broker.check_account())
+                    except ValueError as exc:
+                        snap["error"] = str(exc)
+                    ledger.save_baseline(broker.baseline)
+                    if ledger.unresolved():
+                        snap["error"] = (
+                            "Uncertain local operation; operator reconciliation required"
+                        )
+                    response = client.post("/api/worker/heartbeat", json=snap)
+                    response.raise_for_status()
                     ledger.sync(client)
                     # Management commands remain eligible when entries are paused or uncertain.
                     for _ in range(8):
@@ -523,7 +521,6 @@ def main():
                     logging.exception(
                         "Worker synchronization failed; entries are not resent"
                     )
-                tick += 1
                 time.sleep(1)
     finally:
         if broker:

@@ -40,6 +40,9 @@ class PlatformStore:
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             INSERT OR IGNORE INTO settings VALUES('paused','false');
             """)
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS equity_account_time ON equity(account_id,created,id)"
+            )
             from .instruments import migrate
 
             migrate(db)
@@ -747,10 +750,28 @@ class PlatformStore:
             last = db.execute(
                 "SELECT MAX(created) FROM equity WHERE account_id=?", (a["id"],)
             ).fetchone()[0]
-            if not last or time.time() - last > 60:
+            if not last or time.time() - last >= 5:
                 db.execute(
                     "INSERT INTO equity(account_id,balance,equity,created) VALUES(?,?,?,?)",
                     (a["id"], snapshot["balance"], snapshot["equity"], time.time()),
+                )
+            retention_key = "equity_compact:" + a["id"]
+            compact = db.execute(
+                "SELECT value FROM settings WHERE key=?", (retention_key,)
+            ).fetchone()
+            if not compact or time.time() - float(compact[0]) >= 3600:
+                now = time.time()
+                db.execute(
+                    "DELETE FROM equity WHERE account_id=? AND created<?",
+                    (a["id"], now - 2592000),
+                )
+                db.execute(
+                    "DELETE FROM equity WHERE account_id=? AND created<? AND id NOT IN (SELECT MAX(id) FROM equity WHERE account_id=? AND created<? GROUP BY CAST(created / 60 AS INTEGER))",
+                    (a["id"], now - 86400, a["id"], now - 86400),
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO settings VALUES(?,?)",
+                    (retention_key, str(now)),
                 )
             if snapshot.get("error"):
                 db.execute("UPDATE accounts SET enabled=0 WHERE id=?", (a["id"],))
@@ -862,7 +883,27 @@ class PlatformStore:
                 row["account_id"],
             )
 
-    def dashboard(self, user):
+    def equity_history(self, user, account_id, period="LIVE"):
+        periods = {
+            "LIVE": (1800, 5),
+            "1D": (86400, 120),
+            "7D": (604800, 600),
+            "30D": (2592000, 3600),
+        }
+        if period not in periods:
+            raise ValueError("Unknown equity period")
+        duration, bucket = periods[period]
+        with self.db() as db:
+            self.account(user, account_id, db)
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT e.* FROM equity e JOIN (SELECT MAX(id) id FROM equity WHERE account_id=? AND created>=? GROUP BY CAST(created / ? AS INTEGER)) b ON b.id=e.id ORDER BY e.created,e.id",
+                    (account_id, time.time() - duration, bucket),
+                )
+            ]
+
+    def dashboard(self, user, include_equity=True):
         with self.db() as db:
             accounts = []
             for row in db.execute(
@@ -916,13 +957,19 @@ class PlatformStore:
                     (user,),
                 )
             ]
-            equity = [
-                dict(r)
-                for r in db.execute(
-                    "SELECT e.* FROM equity e JOIN accounts a ON a.id=e.account_id WHERE a.user_id=? ORDER BY e.created DESC LIMIT 500",
-                    (user,),
+            equity = (
+                (
+                    [
+                        dict(r)
+                        for r in db.execute(
+                            "SELECT e.* FROM equity e JOIN accounts a ON a.id=e.account_id WHERE a.user_id=? ORDER BY e.created DESC LIMIT 500",
+                            (user,),
+                        )
+                    ][::-1]
                 )
-            ][::-1]
+                if include_equity
+                else []
+            )
             sub = db.execute(
                 "SELECT plan,status,period_end FROM subscriptions WHERE user_id=?",
                 (user,),

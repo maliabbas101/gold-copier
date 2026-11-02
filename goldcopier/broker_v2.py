@@ -494,11 +494,23 @@ class PlatformBroker(MT5Broker):
         if positions is None or orders is None:
             raise ValueError("Cannot read account exposure")
         now = datetime.now(timezone.utc)
-        deals = self.mt.history_deals_get(
-            now.replace(hour=0, minute=0, second=0, microsecond=0), now
-        )
-        if deals is None:
-            raise ValueError("Cannot read trading history")
+        if (
+            time.time() - getattr(self, "_snapshot_history_at", 0) >= 5
+            or getattr(self, "_snapshot_day", None) != now.date()
+        ):
+            deals = self.mt.history_deals_get(
+                now.replace(hour=0, minute=0, second=0, microsecond=0), now
+            )
+            if deals is None:
+                raise ValueError("Cannot read trading history")
+            self._snapshot_deals = deals
+            self._snapshot_history_at = time.time()
+            self._snapshot_day = now.date()
+        deals = self._snapshot_deals
+        if time.time() - getattr(self, "_catalog_at", 0) >= 300:
+            catalog = self.mt.symbols_get() if hasattr(self.mt, "symbols_get") else []
+            self._catalog = [s.name for s in (catalog or [])][:1000]
+            self._catalog_at = time.time()
         return {
             "login": str(a.login),
             "server": a.server,
@@ -529,9 +541,7 @@ class PlatformBroker(MT5Broker):
                 if d.type in (self.mt.DEAL_TYPE_BUY, self.mt.DEAL_TYPE_SELL)
                 and d.entry in (self.mt.DEAL_ENTRY_OUT, self.mt.DEAL_ENTRY_OUT_BY)
             ],
-            "instruments": [s.name for s in self.mt.symbols_get()][:1000]
-            if hasattr(self.mt, "symbols_get")
-            else [],
+            "instruments": self._catalog,
             "positions": [
                 {
                     "ticket": p.ticket,
@@ -539,6 +549,7 @@ class PlatformBroker(MT5Broker):
                     "side": "BUY" if p.type == 0 else "SELL",
                     "volume": p.volume,
                     "price_open": p.price_open,
+                    "price_current": getattr(p, "price_current", None),
                     "sl": p.sl,
                     "tp": p.tp,
                     "profit": p.profit,

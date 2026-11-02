@@ -231,3 +231,17 @@ The previous implicit market entry was checked once at receipt and could reject 
 Without your execution-history result or broker ticket, the exact cause of a particular missed trade cannot be established from the signal text alone. Never resubmit an uncertain operation just because the position is not visible yet.
 
 Official execution references: [MT5 order submission](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersend_py) and [order types / fill policies](https://www.mql5.com/en/docs/constants/tradingconstants/orderproperties).
+
+## Live portfolio and trade updates
+
+**Overview → Live** shows the selected account's rolling 30-minute equity curve. Balance, equity, floating P&L, current position prices, pending orders, and execution outcomes update automatically in **Trades & orders**. The account selector and trade search remain usable while updates arrive; an open management dialog keeps your entered values.
+
+- Keep the service and that account's broker worker running. The worker publishes a fresh account/position snapshot each cycle, normally about once per second; the authenticated browser feed delivers snapshots every second. Broker calls and order confirmation can delay a cycle. This is a sampled portfolio view, not a tick-by-tick exchange feed.
+- Trade history and realized P&L refresh within roughly five seconds. MT5 current prices/floating P&L come from the broker. Direct Exness API positions show fresh available quote prices; unavailable per-position P&L remains **— / Not reported** rather than an invented value.
+- Pausing new entries does not stop account snapshots. The **Live / Stale / Disconnected** indicator distinguishes current broker updates from old data; a stream connection alone never makes stale broker values live. After ten seconds without a broker snapshot the badge says Stale. Broker prices can stop moving when a market is closed.
+- History is collected while the worker runs, independently of browser login. New history samples are saved every five seconds, with older data compacted to minute samples and active-account retention limited to 30 days. **1D / 7D / 30D** request account-specific, time-bucketed history. Periods before the worker was running cannot be reconstructed from login-time data. Existing history is preserved subject to this retention window.
+- Streams reconnect automatically, with one-second HTTP polling as a fallback. Hidden tabs release their stream and reconnect when reopened. Logging out or revoking a session ends its feed. Seeded public-demo data remains explicitly labelled sample data.
+
+After upgrading, restart both the service and broker workers, then hard-refresh the browser. With a broker demo account connected, leave **Overview → Live** or **Trades & orders** open and confirm that quote/P&L changes appear without pressing Refresh. No additional frontend build or API key is required.
+
+For hosted installations, allow long-lived `GET /api/portfolio/stream` responses through the reverse proxy and disable response buffering for this route (`X-Accel-Buffering: no` is supplied). The feed uses the existing same-origin HttpOnly session cookie and checks session validity continuously. `GET /api/portfolio/equity?account_id=...&period=LIVE|1D|7D|30D` enforces the same account ownership rules as the dashboard.

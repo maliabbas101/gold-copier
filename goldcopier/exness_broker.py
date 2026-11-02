@@ -111,14 +111,32 @@ class ExnessBroker(PlatformBroker):
         if request.get("volume", 0) <= 0 and request.get("action") in (1, 5):
             raise ValueError("Invalid volume")
 
+    def snapshot_price(self, position):
+        streams = self.mt.streams
+        if not hasattr(streams, "ticks"):
+            return None
+        with streams.lock:
+            streams.symbols.add(position.symbol)
+            tick = streams.ticks.get(position.symbol)
+        if not streams.ready or not tick or abs(time.time() - tick["time"]) > 10:
+            return None
+        return tick["bid"] if position.type == 0 else tick["ask"]
+
     def snapshot(self):
         a = self.check_account()
         positions = self.mt.positions_get()
         orders = self.mt.orders_get()
         now = datetime.now(timezone.utc)
-        deals = self.mt.history_deals_get(
-            now.replace(hour=0, minute=0, second=0, microsecond=0), now
-        )
+        if (
+            time.time() - getattr(self, "_snapshot_history_at", 0) >= 5
+            or getattr(self, "_snapshot_day", None) != now.date()
+        ):
+            self._snapshot_deals = self.mt.history_deals_get(
+                now.replace(hour=0, minute=0, second=0, microsecond=0), now
+            )
+            self._snapshot_history_at = time.time()
+            self._snapshot_day = now.date()
+        deals = self._snapshot_deals
         return {
             "login": str(a.login),
             "server": self.cfg["server"],
@@ -135,6 +153,7 @@ class ExnessBroker(PlatformBroker):
                     "side": "BUY" if p.type == 0 else "SELL",
                     "volume": p.volume,
                     "price_open": p.price_open,
+                    "price_current": self.snapshot_price(p),
                     "sl": p.sl,
                     "tp": p.tp,
                     "profit": None,

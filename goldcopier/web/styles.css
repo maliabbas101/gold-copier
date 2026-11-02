@@ -3,3 +3,7 @@
 [hidden]{display:none!important}
 
 .password-control{position:relative}.password-control input{padding-right:48px}.password-toggle{position:absolute;right:5px;top:50%;transform:translateY(-50%);background:transparent;color:var(--muted);padding:8px;border-radius:4px}#toast.visible{display:flex;align-items:center;gap:16px}#toast button{background:transparent;color:inherit;padding:4px;flex-shrink:0}#toast{max-width:min(420px,calc(100vw - 32px));right:16px}.top-right .btn{font-size:11px}@media(max-width:700px){.top-right>.badge{display:none}}
+
+/* Keep every navigation item reachable on short and zoomed viewports. */
+.sidebar{height:100vh;height:100dvh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;scrollbar-color:#647a82 var(--nav)}
+.sidebar>*{flex-shrink:0}

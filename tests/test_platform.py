@@ -444,11 +444,11 @@ def test_central_pause_and_worker_automatic_exit_audit(workspace):
     )
 
 
-def test_disconnect_requires_fresh_flat_account_and_revokes_token(workspace):
+def test_disconnect_revokes_token_without_requiring_empty_snapshot(workspace):
     a = add_account(workspace)
     token, agent = worker_ready(workspace, a)
     workspace.store.set_enabled(workspace.owner, a, False)
-    assert workspace.client.delete(f"/api/accounts/{a}").status_code == 200
+    assert workspace.client.post(f"/api/accounts/{a}/disconnect", json={"acknowledge_unmanaged_trades": True}).status_code == 200
     assert workspace.store.agent(token) is None
 
 
@@ -555,3 +555,54 @@ def test_discord_edits_update_protection_without_new_entries(workspace, bot):
     with w.store.db() as db:
         actions = [json.loads(r[0])['action'] for r in db.execute('SELECT payload FROM pjobs ORDER BY created')]
     assert actions == ['entry', 'modify']
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_offline_account_can_be_removed_without_another_account(workspace, delete):
+    w = workspace
+    a = add_account(w)
+    token = w.store.rotate_agent(w.owner, a)
+    old_agent = w.store.agent(token)
+    queued = w.store.control(w.owner, a, {"action": "close", "position": 42})
+    with w.store.db() as db:
+        db.execute("UPDATE accounts SET enabled=1,snapshot=? WHERE id=?", (dump({"positions": [{"ticket": 42}], "orders": [], "error": "Connection problem"}), a))
+    url = f"/api/accounts/{a}" + ("" if delete else "/disconnect")
+    response = w.client.request("DELETE" if delete else "POST", url, json={"acknowledge_unmanaged_trades": True})
+    assert response.status_code == 200, response.text
+    assert w.store.agent(token) is None
+    assert w.store.claim(old_agent) is None
+    assert len(w.store.dashboard(w.owner)["accounts"]) == (0 if delete else 1)
+    with w.store.db() as db:
+        assert db.execute("SELECT state FROM pjobs WHERE id=?", (queued,)).fetchone()[0] == "cancelled"
+    if not delete:
+        assert w.store.account(w.owner, a)["disconnected"] == 1
+    else:
+        # Explicitly deleting an account must not cause bootstrap to recreate it.
+        from goldcopier import runtime
+        runtime.bootstrap_account(w.store, "unused-terminal")
+        assert not w.store.dashboard(w.owner)["accounts"]
+
+
+def test_removal_requires_acknowledgement_and_ownership(workspace):
+    w = workspace
+    a = add_account(w)
+    assert w.client.post(f"/api/accounts/{a}/disconnect", json={}).status_code == 422
+    with pytest.raises(ValueError, match="Account not found"):
+        w.store.disconnect_account(w.other, a)
+    assert w.store.account(w.owner, a)["disconnected"] == 0
+
+
+def test_disconnect_preserves_uncertain_work_and_delete_requires_reconciliation(workspace):
+    w = workspace
+    a = add_account(w)
+    token, agent = worker_ready(w, a)
+    job = w.store.control(w.owner, a, {"action": "close", "position": 42})
+    w.store.claim(agent)
+    w.store.disconnect_account(w.owner, a)
+    assert w.store.agent(token) is None
+    with w.store.db() as db:
+        assert db.execute("SELECT state FROM pjobs WHERE id=?", (job,)).fetchone()[0] == "uncertain"
+    with pytest.raises(ValueError, match="Reconcile"):
+        w.store.disconnect_account(w.owner, a, delete=True)
+    with pytest.raises(ValueError, match="authorization revoked"):
+        w.store.heartbeat(agent, {"login": agent["login"], "server": agent["server"], "mode": agent["mode"]})

@@ -81,3 +81,11 @@ Mutations use the existing browser-session CSRF protection and account ownership
 - [Official OpenAPI contract](https://www.exness-api.com/openapi/trading.public.yaml)
 - [Asynchronous first-trade flow](https://www.exness-api.com/trading/get-started/place-first-trade)
 - [WebSocket protocol](https://www.exness-api.com/trading/get-started/subscribe-to-websocket-events)
+
+## Disconnecting and deleting an account
+
+Both actions are available directly on each **Accounts** card. Disconnect pauses copying, cancels queued work, revokes the token, erases stored credentials, and prevents the local runner from automatically reconnecting. It works with an offline or broken broker connection and does not require adding another account or getting a fresh snapshot. Confirm that you will manage broker trades yourself: existing positions/orders remain at the broker, automated BE/targets stop, and an already submitted command may still execute. In-flight work is marked uncertain for reconciliation.
+
+Delete also removes the account card, follows, and pair mappings. Reconcile claimed/uncertain work first; Disconnect remains available while you do so. Deleting the local account suppresses terminal bootstrap so it stays deleted after a service restart. Security events and execution records remain in the database for audit. To reconnect through the frontend, delete the disconnected account and add it again; supply managed/API credentials again because they were erased. A self-hosted worker can also be reauthorized through the account token endpoint.
+
+The authenticated routes are `POST /api/accounts/{id}/disconnect` and `DELETE /api/accounts/{id}`. Both require CSRF protection and JSON `{"acknowledge_unmanaged_trades":true}`. The delete route now deletes the local account instead of acting as a disconnect alias.

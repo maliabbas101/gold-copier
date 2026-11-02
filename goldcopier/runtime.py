@@ -314,6 +314,9 @@ def bootstrap_account(store, terminal, analyst_id=None):
         return
     with store.db() as db:
         existing = db.execute("SELECT id,user_id FROM accounts WHERE hosting='self'").fetchall()
+    with store.db() as db:
+        if db.execute("SELECT 1 FROM settings WHERE key='local_bootstrap_removed'").fetchone():
+            return
     if existing:
         if analyst_id and len(existing) == 1:
             with store.db() as db:
@@ -400,6 +403,15 @@ class LocalWorker:
 
     def tick(self):
         if self.child is not None:
+            with self.store.db() as db:
+                row = db.execute("SELECT disconnected FROM accounts WHERE id=?", (self.account_id,)).fetchone()
+            if not row or row["disconnected"]:
+                if not stop_child(self.child):
+                    return
+                self.child = None
+                self.account_id = None
+                self.failed = False
+                return
             if self.child.poll() is not None and not self.failed:
                 self.failed = True
                 detail = "MT5 connection stopped. Check the terminal login, server and trading permissions, then restart the server command."
@@ -420,13 +432,13 @@ class LocalWorker:
         if supplied_token:
             agent = self.store.agent(supplied_token)
             if not agent:
-                raise ValueError("AGENT_TOKEN is invalid for this PLATFORM_DB. Use a token from this workspace or leave it blank for automatic provisioning.")
+                raise ValueError("AGENT_TOKEN is invalid or revoked. Clear it or provision a new token in Accounts.")
             if agent["hosting"] != "self" or (selected and selected != agent["id"]):
                 raise ValueError("AGENT_TOKEN must belong to the selected self-hosted account")
             rows = [agent]
         else:
             with self.store.db() as db:
-                rows = [dict(r) for r in db.execute("SELECT * FROM accounts WHERE hosting='self'")]
+                rows = [dict(r) for r in db.execute("SELECT * FROM accounts WHERE hosting='self' AND disconnected=0 AND connector='mt5'")]
         if selected:
             rows = [r for r in rows if r["id"] == selected]
         reason = None

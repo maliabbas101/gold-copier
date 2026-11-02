@@ -211,12 +211,58 @@ class PlatformStore:
             )
         return account_id
 
+    def disconnect_account(self, user, account_id, delete=False):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            a = self.account(user, account_id, db)
+            if (
+                delete
+                and db.execute(
+                    "SELECT 1 FROM pjobs WHERE account_id=? AND state IN ('claimed','uncertain')",
+                    (account_id,),
+                ).fetchone()
+            ):
+                raise ValueError(
+                    "Disconnect is available now. Reconcile in-flight commands before deleting this account."
+                )
+            db.execute(
+                "UPDATE accounts SET agent_hash=NULL,secret=NULL,enabled=0,heartbeat=NULL,disconnected=1 WHERE id=?",
+                (account_id,),
+            )
+            db.execute(
+                "UPDATE pjobs SET state='cancelled' WHERE account_id=? AND state='queued'",
+                (account_id,),
+            )
+            # A claim may already have reached the worker. Never report it as cancelled.
+            db.execute(
+                "UPDATE pjobs SET state='uncertain' WHERE account_id=? AND state='claimed'",
+                (account_id,),
+            )
+            if delete:
+                db.execute("DELETE FROM follows WHERE account_id=?", (account_id,))
+                db.execute(
+                    "DELETE FROM account_pairs WHERE account_id=?", (account_id,)
+                )
+                db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+                if a["hosting"] == "self":
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings VALUES('local_bootstrap_removed','true')"
+                    )
+            self.event(
+                db,
+                user,
+                "security",
+                ("Account deleted" if delete else "Account disconnected")
+                + "; credentials and worker token revoked; broker trades remain unchanged",
+                account_id,
+            )
+
     def rotate_agent(self, user, account_id):
         token = secrets.token_urlsafe(48)
         with self.db() as db:
             self.account(user, account_id, db)
             db.execute(
-                "UPDATE accounts SET agent_hash=?,enabled=0 WHERE id=?",
+                "UPDATE accounts SET agent_hash=?,enabled=0,disconnected=0 WHERE id=?",
                 (digest(token), account_id),
             )
             db.execute(
@@ -233,7 +279,8 @@ class PlatformStore:
             return None
         with self.db() as db:
             row = db.execute(
-                "SELECT * FROM accounts WHERE agent_hash=?", (digest(token),)
+                "SELECT * FROM accounts WHERE agent_hash=? AND disconnected=0",
+                (digest(token),),
             ).fetchone()
             return dict(row) if row else None
 
@@ -241,6 +288,8 @@ class PlatformStore:
         with self.db() as db:
             a = self.account(user, account_id, db)
             if enabled:
+                if a["disconnected"]:
+                    raise ValueError("Reconnect this account before starting copying")
                 if a["mode"] == "live" and not allow_live:
                     raise ValueError("Live execution is disabled by the operator")
                 if not a["heartbeat"] or time.time() - a["heartbeat"] > 30:
@@ -420,7 +469,7 @@ class PlatformStore:
                 (analyst_id, source_id, created),
             )
             rows = db.execute(
-                "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=?",
+                "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=? AND a.disconnected=0",
                 (analyst_id,),
             ).fetchall()
             queued = 0
@@ -525,6 +574,10 @@ class PlatformStore:
     def control(self, user, account_id, payload):
         with self.db() as db:
             a = self.account(user, account_id, db)
+            if a["disconnected"]:
+                raise ValueError(
+                    "Account is disconnected; manage trades directly with your broker"
+                )
             ident = uid()
             db.execute(
                 "INSERT INTO pjobs(id,account_id,feed_id,payload,risk,created,expires) VALUES(?,?,?,?,?,?,?)",
@@ -555,6 +608,16 @@ class PlatformStore:
         ):
             raise ValueError("Worker account identity mismatch")
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute(
+                "SELECT agent_hash,disconnected FROM accounts WHERE id=?", (a["id"],)
+            ).fetchone()
+            if (
+                not current
+                or current["disconnected"]
+                or current["agent_hash"] != a["agent_hash"]
+            ):
+                raise ValueError("Worker authorization revoked")
             db.execute(
                 "UPDATE accounts SET snapshot=?,heartbeat=? WHERE id=?",
                 (dump(snapshot), time.time(), a["id"]),
@@ -577,6 +640,12 @@ class PlatformStore:
             current = db.execute(
                 "SELECT * FROM accounts WHERE id=?", (a["id"],)
             ).fetchone()
+            if (
+                not current
+                or current["disconnected"]
+                or current["agent_hash"] != a["agent_hash"]
+            ):
+                return None
             db.execute(
                 "UPDATE pjobs SET state='expired' WHERE state='queued' AND expires<?",
                 (time.time(),),
@@ -682,7 +751,11 @@ class PlatformStore:
                     a.pop(key, None)
                 a["risk"] = json.loads(a["risk"])
                 a["snapshot"] = json.loads(a["snapshot"] or "{}")
-                a["online"] = bool(a["heartbeat"] and time.time() - a["heartbeat"] < 30)
+                a["online"] = bool(
+                    not a["disconnected"]
+                    and a["heartbeat"]
+                    and time.time() - a["heartbeat"] < 30
+                )
                 a["credential_stored"] = bool(row["secret"])
                 a["pairs"] = [
                     dict(m)

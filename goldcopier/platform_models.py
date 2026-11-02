@@ -62,6 +62,10 @@ class Follow(Model):
     analyst_id: str = Field(min_length=1, max_length=64)
 
 
+class AccountRemoval(Model):
+    acknowledge_unmanaged_trades: Literal[True]
+
+
 class Analyst(Model):
     name: str = Field(min_length=2, max_length=60)
     description: str = Field(default="", max_length=300)

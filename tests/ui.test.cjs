@@ -11,6 +11,8 @@ async function setup(authenticated=false,configOverrides={},dashboardOverride=nu
  const calls=[];
  const dom=new JSDOM('<div id="app"></div><div id="toast"></div><dialog id="modal"></dialog>',{url:authenticated?'http://localhost/#overview':'http://localhost/#demo',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window;
+ // Keep seeded chart fixtures within their intended time window on any test date.
+ w.Date.now=()=>Math.max(...sample.dashboard.equity.map(p=>p.created))*1000+60000;
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
  w.HTMLDialogElement.prototype.close=function(){this.open=false};
  w.HTMLElement.prototype.scrollIntoView=function(){};
@@ -110,4 +112,32 @@ test('Exness connection form sends credentials only to authenticated API and nev
   const call=calls.find(c=>c.url==='/api/accounts/exness');assert.ok(call);assert.equal(call.opt.headers['X-CSRF-Token'],'csrf-test');
   assert.equal(JSON.parse(call.opt.body).private_key,'example-private-key');
  }finally{dom.window.close()}
+});
+
+
+test('disconnect and delete target their account card even if selection changes in the dialog',async()=>{
+ for(const operation of ['disconnect','delete']){
+  const dashboard=structuredClone(sample.dashboard);const first=dashboard.accounts[0];
+  dashboard.accounts=[first,{...structuredClone(first),id:'second-account',name:'Other MT5',online:false,heartbeat:null,snapshot:{error:'Connection problem'},disconnected:false}];
+  const {dom,w,calls}=await setup(true,{demo:false,local_worker_available:true},dashboard);
+  try{
+   w.location.hash='accounts';await tick();
+   w.document.querySelector(`[data-action="${operation==='delete'?'delete-account':'disconnect'}"][data-account="second-account"]`).click();await tick();
+   const f=w.document.querySelector('#account-removal-form');assert.ok(f);assert.equal(f.elements.namedItem('account_id').value,'second-account');
+   assert.ok(f.querySelector('#removal-confirm').required);assert.match(f.textContent,/Existing positions and pending orders remain/);
+   // Selection changes cannot redirect a pending confirmation to a different account.
+   w.eval(`selected=${JSON.stringify(first.id)}`);
+   f.querySelector('#removal-confirm').checked=true;f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+   const call=calls.find(c=>c.url==='/api/accounts/second-account'+(operation==='disconnect'?'/disconnect':''));assert.ok(call);
+   assert.equal(call.opt.method,operation==='disconnect'?'POST':'DELETE');assert.equal(call.opt.headers['X-CSRF-Token'],'csrf-test');
+   assert.equal(JSON.parse(call.opt.body).acknowledge_unmanaged_trades,true);
+   assert.ok(!calls.some(c=>c.url==='/api/accounts'&&c.opt.method==='POST'));
+  }finally{dom.window.close()}
+ }
+});
+
+test('disconnected account stays visibly disconnected and cannot start copying',async()=>{
+ const dashboard=structuredClone(sample.dashboard);dashboard.accounts[0].disconnected=true;
+ const {dom,w}=await setup(true,{demo:false},dashboard);
+ try{w.location.hash='accounts';await tick();const card=w.document.querySelector('.account-card');assert.match(card.textContent,/Disconnected/);assert.equal(card.querySelector('[data-action="toggle-copy"]').disabled,true);assert.equal(card.querySelector('[data-action="disconnect"]').disabled,true);assert.ok(card.querySelector('[data-action="delete-account"]'))}finally{dom.window.close()}
 });

@@ -49,7 +49,11 @@ def migrate(db):
     CREATE TABLE IF NOT EXISTS account_pairs(account_id TEXT NOT NULL,pair TEXT NOT NULL,broker_symbol TEXT NOT NULL,max_spread REAL NOT NULL,max_entry_distance REAL NOT NULL,max_lots REAL NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(account_id,pair),UNIQUE(account_id,broker_symbol));
     CREATE TABLE IF NOT EXISTS signal_messages(analyst_id TEXT NOT NULL,source_id TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(analyst_id,source_id));
     """)
-    db.execute('BEGIN IMMEDIATE')
+    db.execute("BEGIN IMMEDIATE")
+    if "disconnected" not in [r[1] for r in db.execute("PRAGMA table_info(accounts)")]:
+        db.execute(
+            "ALTER TABLE accounts ADD COLUMN disconnected INTEGER NOT NULL DEFAULT 0"
+        )
     if not db.execute(
         "SELECT 1 FROM settings WHERE key='pair_registry_seed_v1'"
     ).fetchone():

@@ -586,3 +586,22 @@ def test_terminal_without_gold_can_register_a_forex_account(settings,monkeypatch
         assert row['symbol']=='EURUSD'
         # Non-gold limits must be explicitly configured, never copied from gold.
         assert db.execute('SELECT COUNT(*) FROM account_pairs').fetchone()[0]==0
+
+
+def test_disconnected_local_worker_stops_and_is_not_automatically_reprovisioned(settings, monkeypatch):
+    store, state, *_ = runtime.configure()
+    owner, ident = account(store)
+    token = store.rotate_agent(owner, ident)
+    worker = runtime.LocalWorker(store, state, "terminal.exe")
+    worker.account_id = ident
+    child = Obj(poll=lambda: None)
+    worker.child = child
+    stopped = []
+    monkeypatch.setattr(runtime, "stop_child", lambda process: stopped.append(process) or True)
+    monkeypatch.setattr(runtime, "start_child", lambda *a, **kw: pytest.fail("must not restart disconnected account"))
+    store.disconnect_account(owner, ident)
+    worker.tick()
+    worker.tick()
+    assert stopped == [child]
+    assert worker.child is None
+    assert store.agent(token) is None

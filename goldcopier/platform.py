@@ -407,37 +407,16 @@ def create_app():
             )
         }
 
+    @app.post("/api/accounts/{account_id}/disconnect")
+    def disconnect_account(
+        account_id: str, body: M.AccountRemoval, current=Depends(user)
+    ):
+        store.disconnect_account(current["id"], account_id)
+        return {"ok": True}
+
     @app.delete("/api/accounts/{account_id}")
-    def remove_account(account_id: str, current=Depends(user)):
-        with store.db() as db:
-            a = store.account(current["id"], account_id, db)
-            snap = json.loads(a["snapshot"] or "{}")
-            if db.execute(
-                "SELECT 1 FROM pjobs WHERE account_id=? AND state IN ('claimed','uncertain')",
-                (account_id,),
-            ).fetchone():
-                raise ValueError("Reconcile in-flight commands before disconnecting")
-            if (
-                a["enabled"]
-                or not a["heartbeat"]
-                or time.time() - a["heartbeat"] > 30
-                or snap.get("positions")
-                or snap.get("orders")
-            ):
-                raise ValueError(
-                    "Pause copying and verify a fresh empty broker account before disconnecting"
-                )
-            db.execute(
-                "UPDATE accounts SET agent_hash=NULL,secret=NULL,enabled=0 WHERE id=?",
-                (account_id,),
-            )
-            store.event(
-                db,
-                current["id"],
-                "security",
-                "Account disconnected; credentials and worker token revoked",
-                account_id,
-            )
+    def remove_account(account_id: str, body: M.AccountRemoval, current=Depends(user)):
+        store.disconnect_account(current["id"], account_id, delete=True)
         return {"ok": True}
 
     @app.get("/api/trades/export")

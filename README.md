@@ -1,6 +1,6 @@
 # Gold Copier
 
-Trade once on a trader's MT5 or eligible Exness API account. The copier sends protected new fills directly to followers and posts Discord logs separately. **You do not enter each trade in Discord and then in the operator console.**
+Trade once on a trader's MT5 or eligible Exness API account. The copier sends protected new fills directly to followers and posts Discord confirmations after successful follower execution. **You do not enter each trade in Discord and then in the operator console.**
 
 ## Start here: one master, many subscribers
 
@@ -11,6 +11,12 @@ Trade once on a trader's MT5 or eligible Exness API account. The copier sends pr
 The service operator provisions hosted execution capacity, payment configuration and the Discord app once. A and B use the web app; they do not install workers or manage tokens. **This branch implements the product flow; live hosting, provider credentials and broker acceptance still need deployment and a demo-account acceptance run.** See [community setup and deployment](docs/COMMUNITIES.md).
 
 The authenticated frontend opens at `http://127.0.0.1:8001/#community` when using the local runtime below. Source code changes alone do not create a public hosted frontend URL.
+
+### Exness app/web trades and Discord confirmations
+
+A trade opened through Exness app/web is copied when it appears as a new position in the **same connected master trading account**, with a mapped symbol and SL. The app used to submit it does not select a different copying path. Trading on another Exness account or platform does not make it visible to this account's observer.
+
+Discord trade signals are published **after at least one follower reports successful execution**, not merely when the master trade is observed or queued. If all followers are offline, paused, ineligible, or reject the entry, no trade signal is posted. The master and affected follower can inspect private Activity for the reason. A confirmation for one follower does not assert that every subscriber filled. Broker risk checks remain in effect and rejected/uncertain entries are not automatically retried. Discord delivery failures do not block follower execution.
 
 ## Advanced local setup: broker → copier → followers
 

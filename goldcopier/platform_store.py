@@ -641,6 +641,10 @@ class PlatformStore:
                 "SELECT a.*,f.risk AS follow_risk FROM accounts a JOIN follows f ON f.account_id=a.id WHERE f.analyst_id=? AND a.disconnected=0 AND a.purpose='follower'",
                 (analyst_id,),
             ).fetchall()
+            if origin == "broker":
+                for payload in payloads:
+                    payload["broker_source_text"] = text
+                    payload["broker_source_id"] = source_id
             queued = 0
             ids = []
             skipped = []
@@ -816,14 +820,23 @@ class PlatformStore:
                     )
                     queued += 1
             if origin == "broker":
-                from .source_platform import enqueue_log
+                from .source_platform import master_feedback
 
-                enqueue_log(
+                reasons = "; ".join(dict.fromkeys(item["reason"] for item in skipped))
+                master_feedback(
+                    self,
                     db,
                     analyst_id,
-                    "source:" + analyst_id + ":" + source_id,
-                    text
-                    + f"\nFollower commands queued: {queued}; skipped: {len(skipped)}\nSource: {source_id}\nLog only; do not resubmit this message.",
+                    f"Source {source_id}: {queued} follower command(s) queued; "
+                    f"{len(skipped)} skipped. "
+                    + (
+                        reasons
+                        if reasons
+                        else ""
+                        if queued
+                        else "No follower command was eligible for this event."
+                    )
+                    + " Discord signal waits for confirmed follower execution.",
                 )
             return {
                 "id": ids[0],
@@ -1005,6 +1018,7 @@ class PlatformStore:
 
     def result(self, a, job_id, result):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM pjobs WHERE id=? AND account_id=?", (job_id, a["id"])
             ).fetchone()
@@ -1020,19 +1034,43 @@ class PlatformStore:
                 (result["state"], encoded, job_id),
             )
             self.event(db, a["user_id"], "execution", result["detail"], a["id"])
-            from .source_platform import enqueue_log
+            from .source_platform import enqueue_log, master_feedback
 
             source_feed = db.execute(
-                "SELECT f.analyst_id,f.source_id FROM feeds f JOIN analysts n ON n.id=f.analyst_id WHERE f.id=? AND n.source_mode='broker'",
+                "SELECT f.* FROM feeds f JOIN analysts n ON n.id=f.analyst_id WHERE f.id=? AND n.source_mode='broker'",
                 (row["feed_id"],),
             ).fetchone()
             if source_feed:
-                enqueue_log(
+                payload = json.loads(source_feed["payload"])
+                action = payload["action"]
+                source_id = payload.get("broker_source_id", source_feed["source_id"])
+                detail = result["detail"]
+                # Broker errors may include the follower login/server. Keep them private.
+                for sensitive in (a.get("login"), a.get("server")):
+                    if sensitive:
+                        detail = detail.replace(str(sensitive), "[private]")
+                master_feedback(
+                    self,
                     db,
-                    source_feed[0],
-                    "result:" + job_id + ":" + result["state"],
-                    f"Follower job {job_id[:10]}: {result['state']}\n{result['detail']}\nSource: {source_feed['source_id']}",
+                    source_feed["analyst_id"],
+                    f"Source {source_id}: follower {action} {result['state']}: {detail[:300]}",
                 )
+                if result["state"] == "executed":
+                    text = payload.get("broker_source_text")
+                    if not text and action == "entry":
+                        # Jobs queued before this update still publish only after execution.
+                        text = f"{payload['symbol']} {payload['side']} CMP\nSL: {payload['sl']}"
+                        if payload.get("tp"):
+                            text += f"\nTP: {payload['tp']}"
+                    enqueue_log(
+                        db,
+                        source_feed["analyst_id"],
+                        "source:" + source_feed["analyst_id"] + ":" + source_id,
+                        (text or f"Master {action} update")
+                        + "\nConfirmed executed on at least one follower account."
+                        + "\nOther followers may be pending, skipped or rejected; check private Activity."
+                        + f"\nSource: {source_id}\nLog only; do not resubmit this message.",
+                    )
             if result["state"] == "uncertain":
                 db.execute("UPDATE accounts SET enabled=0 WHERE id=?", (a["id"],))
 

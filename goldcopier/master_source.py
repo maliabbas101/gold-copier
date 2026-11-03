@@ -8,8 +8,6 @@ import hashlib
 import json
 import time
 
-import httpx
-
 from .broker_v2 import MAGIC
 
 
@@ -124,8 +122,20 @@ class MasterObserver:
                     response.raise_for_status()
                     accepted = True
                     result = response.json()
-                    if result.get("skipped"):
-                        self.status = f"Source delivered; {len(result['skipped'])} follower(s) skipped. See Activity."
+                    reasons = "; ".join(
+                        dict.fromkeys(s["reason"] for s in result.get("skipped", []))
+                    )
+                    self.status = (
+                        f"{result.get('queued', 0)} follower command(s) queued; Discord waits for execution. "
+                        + (
+                            reasons
+                            or (
+                                ""
+                                if result.get("queued")
+                                else "No eligible followers. See Activity."
+                            )
+                        )
+                    )[:500]
             if event["kind"] == "entry" and not accepted:
                 plan["positions"][event["position"]]["mirrored"] = False
                 plan["positions"][event["position"]]["blocked"] = True
@@ -253,9 +263,7 @@ class MasterObserver:
                 )
                 reference = event("entry", ident, text)
                 record.update(mirrored=True, reference=reference, data=p)
-                self.status = (
-                    "Trader fill delivered directly; Discord log is queued separately"
-                )
+                self.status = "Trader fill observed; waiting for follower execution before Discord output"
                 continue
             old = record["data"]
             reference = record["reference"]

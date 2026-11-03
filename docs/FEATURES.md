@@ -20,7 +20,7 @@ This implementation uses the public descriptions of Inspired Analyst Bot as a fu
 | Card subscriptions / cancellation portal | Stripe integration implemented; operator keys, products, portal and webhooks required |
 | Crypto payments | Not implemented |
 | Secure stored credentials | Server-side AES-256-GCM at-rest vault; no claim of client-side/end-to-end encryption |
-| Direct trader copying | Scoped read-only MT5/eligible Exness source worker → follower queue; asynchronous Discord outbox; source pending orders and scale-ins excluded |
+| Direct trader copying | Scoped read-only MT5/eligible Exness source worker → follower queue; Discord output after follower execution confirmation; private skip/rejection diagnostics; source pending orders and scale-ins excluded |
 | Pending follower entries | Explicit LIMIT/STOP and AUTO; CMP executes at current market within tolerance |
 | Hot standby / zero-downtime claims | Not implemented as an automatic trading failover mechanism; supervised recovery documented |
 | P&L and trade visibility | Snapshot equity chart, current positions/orders, today's closed deals, realized P&L, command history and CSV |

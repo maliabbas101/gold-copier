@@ -21,6 +21,26 @@ def deliver_one(store, client, token):
         if not row:
             return False
         row = dict(row)
+        if "\nFollower commands queued:" in row["content"]:
+            # Upgrade old queue-only logs without sending a misleading backlog.
+            source = row["content"].rsplit("\nSource: ", 1)[-1].split("\n", 1)[0]
+            copied = db.execute(
+                "SELECT 1 FROM pjobs j JOIN feeds f ON f.id=j.feed_id WHERE f.analyst_id=? AND (f.source_id=? OR json_extract(f.payload,'$.source_group')=?) AND j.state='executed' LIMIT 1",
+                (row["analyst_id"], source, source),
+            ).fetchone()
+            if not copied:
+                # A later successful worker acknowledgement recreates this source log.
+                db.execute("DELETE FROM discord_outbox WHERE id=?", (row["id"],))
+                return True
+            row["content"] = (
+                row["content"].split("\nFollower commands queued:", 1)[0]
+                + "\nConfirmed executed on at least one follower account."
+                + f"\nSource: {source}\nLog only; do not resubmit this message."
+            )
+            db.execute(
+                "UPDATE discord_outbox SET content=? WHERE id=?",
+                (row["content"], row["id"]),
+            )
         db.execute(
             "UPDATE discord_outbox SET state='sending',attempts=attempts+1,next_attempt=? WHERE id=?",
             (now + 30, row["id"]),

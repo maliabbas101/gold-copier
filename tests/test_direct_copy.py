@@ -137,7 +137,7 @@ def test_trade_once_copies_directly_and_queues_discord_log(
     assert result["state"] == "executed" and len(mt.sent) == 1
     w.store.result(agent, job["id"], result)
     with w.store.db() as db:
-        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 1
     # Discord fails; the already executed follower trade is unchanged.
     client = httpx.Client(
         transport=httpx.MockTransport(lambda request: httpx.Response(503))
@@ -189,7 +189,7 @@ def test_lost_response_retries_same_event_without_duplicate_copy(workspace, tmp_
             ).fetchone()[0]
             == 1
         )
-        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
     assert source.mt.sent == []
 
 
@@ -492,3 +492,154 @@ def test_restarting_source_does_not_backfill_unobserved_existing_positions(
     source.observer = MasterObserver(source.broker, source.ledger, source.client)
     step(source)
     assert not w.store.dashboard(w.owner)["jobs"]
+
+
+@pytest.mark.parametrize("magic,comment", [(0, ""), (987654, "Exness web terminal")])
+def test_external_master_fills_copy_before_discord_publication(
+    workspace, tmp_path, connected_v2, magic, comment
+):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    p = position()
+    p.magic, p.comment = magic, comment
+    source.mt.positions = (p,)
+    step(source)
+    with w.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
+    job = w.store.claim(agent)
+    assert job and job["signal"]["action"] == "entry"
+    b, mt = connected_v2
+    mt.account.login, mt.account.server = int(agent["login"]), agent["server"]
+    b.cfg.update(login=agent["login"], server=agent["server"])
+    ledger = Ledger(tmp_path / "external-follower.db")
+    execute(job, b, ledger)
+    outcome = json.loads(
+        ledger.db.execute(
+            "SELECT result FROM operations WHERE id=?", (job["id"],)
+        ).fetchone()[0]
+    )
+    assert outcome["state"] == "executed" and len(mt.sent) == 1
+    w.store.result(agent, job["id"], outcome)
+    w.store.result(agent, job["id"], outcome)  # repeated acknowledgement
+    with w.store.db() as db:
+        messages = db.execute("SELECT content FROM discord_outbox").fetchall()
+        assert len(messages) == 1
+        assert "BUY CMP" in messages[0][0] and "Confirmed executed" in messages[0][0]
+
+
+def test_no_eligible_follower_means_no_discord_signal_and_private_master_reason(
+    workspace, tmp_path
+):
+    w = workspace
+    follower = add_account(w)
+    worker_ready(w, follower)
+    w.store.set_enabled(w.owner, follower, False)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    with w.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
+        feedback = db.execute(
+            "SELECT detail FROM events WHERE account_id=? AND kind='source'",
+            (source.account,),
+        ).fetchall()
+        assert any("Copying is paused" in r[0] for r in feedback)
+    assert "Copying is paused" in source.observer.status
+
+
+@pytest.mark.parametrize("state", ["rejected", "uncertain"])
+def test_failed_follower_does_not_publish_master_signal(workspace, tmp_path, state):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    job = w.store.claim(agent)
+    w.store.result(
+        agent, job["id"], {"state": state, "detail": "Spread exceeds risk limit"}
+    )
+    with w.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT 1 FROM events WHERE account_id=? AND detail LIKE ?",
+            (source.account, "%Spread exceeds risk limit%"),
+        ).fetchone()
+
+
+def test_first_success_publishes_once_even_when_other_followers_fail(
+    workspace, tmp_path
+):
+    w = workspace
+    first, second, third = [
+        add_account(w, login=str(n)) for n in (112233, 223344, 334455)
+    ]
+    agents = [worker_ready(w, account)[1] for account in (first, second, third)]
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    jobs = [w.store.claim(agent) for agent in agents]
+    w.store.result(
+        agents[0], jobs[0]["id"], {"state": "rejected", "detail": "Insufficient margin"}
+    )
+    with w.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
+    for agent, job in zip(agents[1:], jobs[1:]):
+        w.store.result(
+            agent, job["id"], {"state": "executed", "detail": "Broker confirmed fill"}
+        )
+    with w.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 1
+        assert (
+            "at least one follower"
+            in db.execute("SELECT content FROM discord_outbox").fetchone()[0]
+        )
+
+
+def test_legacy_queue_only_log_is_suppressed_then_recreated_on_execution(
+    workspace, tmp_path
+):
+    from goldcopier.source_platform import enqueue_log
+
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    job = w.store.claim(agent)
+    with w.store.db() as db:
+        feed = db.execute(
+            "SELECT * FROM feeds WHERE id=(SELECT feed_id FROM pjobs WHERE id=?)",
+            (job["id"],),
+        ).fetchone()
+        enqueue_log(
+            db,
+            w.analyst,
+            "source:" + w.analyst + ":" + feed["source_id"],
+            "XAUUSD BUY CMP\nSL:2695\nFollower commands queued: 1; skipped: 0\nSource: "
+            + feed["source_id"],
+        )
+    sent = []
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda req: sent.append(req) or httpx.Response(200)
+        )
+    )
+    assert deliver_one(w.store, client, "test-token")
+    assert not sent
+    w.store.result(
+        agent, job["id"], {"state": "executed", "detail": "Broker confirmed fill"}
+    )
+    assert deliver_one(w.store, client, "test-token")
+    assert (
+        len(sent) == 1
+        and "Confirmed executed" in json.loads(sent[0].content)["content"]
+    )

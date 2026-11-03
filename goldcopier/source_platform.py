@@ -119,3 +119,13 @@ def enqueue_log(db, analyst_id, key, content):
             else "Set a Discord log channel in trader source setup to publish this log",
         ),
     )
+
+
+def master_feedback(store, db, analyst_id, detail):
+    """Show delivery failures to the source owner without broadcasting a signal."""
+    source = db.execute(
+        "SELECT a.id,a.user_id FROM master_sources s JOIN accounts a ON a.id=s.account_id WHERE s.analyst_id=?",
+        (analyst_id,),
+    ).fetchone()
+    if source:
+        store.event(db, source["user_id"], "source", detail, source["id"])

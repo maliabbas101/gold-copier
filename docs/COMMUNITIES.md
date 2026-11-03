@@ -37,3 +37,24 @@ A missing supervisor, full terminal pool, unavailable broker API, or missing pay
 `community.py` owns the parent/membership/child model and entitlement checks. `community_routes.py` exposes scoped onboarding APIs; `community_billing.py` handles hosted subscriptions; `community_discord.py` binds an authorized Discord destination to its master. Legacy Discord-ingestion/operator tools remain for advanced installations; they are not part of the default community onboarding.
 
 One community is currently supported per master login and one connected child account per member per community. Pair CRUD and per-account symbol maps remain available. Membership cancellation does not remove stored history. Broker account disconnect/delete remain explicit actions on account cards.
+
+## Readable trade logs and broker diagnostics
+
+Discord confirmations use a short stable trade reference, plain action names, and full Stop loss / Take profit labels. The same reference follows a copied trade through protection updates and closure. Internal source IDs and worker job IDs remain in private technical details. Failure explanations and suggested next steps appear in Activity; the frontend collapses the technical details by default. No unsuccessful trade is announced as copied.
+
+Example confirmation (illustrative):
+
+```text
+✅ Trade copied
+XAUUSD SELL · Trade #A1B2C3D4
+Entry: current market price
+Stop loss: 3927.192
+Take profit: not set yet
+Copied to at least one follower account.
+```
+
+A missing MT5 `order_check` result is now recorded with `last_error()` rather than `code=none`. Real request fields, including an unset TP, are converted to built-in floats before checking and sending; IDs and enumeration fields use integers. This covers the no-TP format often seen when opening a trade in the Exness app and adding TP later. The request still requires broker preflight approval; a failed check is not bypassed or automatically resubmitted.
+
+If the original follower entry is rejected, cancelled or expired, subsequent master SL/TP/close events are skipped for that follower. Updates already queued are cancelled before broker submission. Updates wait while the original entry is queued or being submitted. An uncertain entry remains eligible for position management because a broker position may exist and must not be abandoned.
+
+After updating, restart the platform, supervisor and Discord sender, then use a **new** master demo trade with an SL and initially no TP. Existing failed trades are not replayed. Confirm the copied position in the follower terminal, then add TP on the master and verify its update. If the terminal still rejects a request, the private Technical details now retain its actual error; the previous `code=none` message alone cannot establish the exact terminal failure.

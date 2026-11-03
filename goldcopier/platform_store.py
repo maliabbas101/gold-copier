@@ -789,10 +789,27 @@ class PlatformStore:
                         }
                     else:
                         original = db.execute(
-                            "SELECT payload FROM pjobs WHERE account_id=? AND feed_id=? AND json_extract(payload,'$.action')='entry'",
+                            "SELECT payload,state FROM pjobs WHERE account_id=? AND feed_id=? AND json_extract(payload,'$.action')='entry'",
                             (a["id"], payload["signal_id"]),
                         ).fetchone()
                         if not original:
+                            continue
+                        if original["state"] in ("rejected", "cancelled", "expired"):
+                            reason = "Update skipped because the original copied trade did not open."
+                            self.event(
+                                db,
+                                a["user_id"],
+                                "signal",
+                                f"{payload['symbol']}: {reason}",
+                                a["id"],
+                            )
+                            skipped.append(
+                                {
+                                    "account_id": a["id"],
+                                    "pair": payload["symbol"],
+                                    "reason": reason,
+                                }
+                            )
                             continue
                         original = json.loads(original[0])
                         jobpayload = {
@@ -827,16 +844,15 @@ class PlatformStore:
                     self,
                     db,
                     analyst_id,
-                    f"Source {source_id}: {queued} follower command(s) queued; "
-                    f"{len(skipped)} skipped. "
+                    f"Master trade received. Processing {queued} follower(s); {len(skipped)} skipped. "
                     + (
                         reasons
-                        if reasons
-                        else ""
-                        if queued
-                        else "No follower command was eligible for this event."
-                    )
-                    + " Discord signal waits for confirmed follower execution.",
+                        or (
+                            "Waiting for the follower broker to confirm."
+                            if queued
+                            else "No follower account is ready to copy this trade."
+                        )
+                    ),
                 )
             return {
                 "id": ids[0],
@@ -941,6 +957,22 @@ class PlatformStore:
                 db.execute("UPDATE accounts SET enabled=0 WHERE id=?", (a["id"],))
                 self.event(db, a["user_id"], "alert", snapshot["error"], a["id"])
 
+    def cancel_failed_followups(self, db, account_id):
+        failed = db.execute(
+            "SELECT j.* FROM pjobs j JOIN pjobs original ON original.account_id=j.account_id AND original.feed_id=json_extract(j.payload,'$.signal_id') AND json_extract(original.payload,'$.action')='entry' WHERE j.account_id=? AND j.state='queued' AND json_extract(j.payload,'$.action')!='entry' AND json_extract(j.payload,'$.origin')='analyst' AND original.state IN ('rejected','cancelled','expired')",
+            (account_id,),
+        ).fetchall()
+        for job in failed:
+            detail = "Update skipped: the original copied trade did not open. No action was sent to the broker."
+            db.execute(
+                "UPDATE pjobs SET state='cancelled',result=? WHERE id=?",
+                (dump({"state": "cancelled", "detail": detail}), job["id"]),
+            )
+            account = db.execute(
+                "SELECT user_id FROM accounts WHERE id=?", (account_id,)
+            ).fetchone()
+            self.event(db, account["user_id"], "signal", detail, account_id)
+
     def claim(self, a, billing=False):
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -988,6 +1020,7 @@ class PlatformStore:
                 "UPDATE pjobs SET state='cancelled' WHERE account_id=? AND state='queued' AND json_extract(payload,'$.action')='entry' AND NOT EXISTS (SELECT 1 FROM account_pairs m JOIN pairs p ON p.symbol=m.pair WHERE m.account_id=pjobs.account_id AND m.pair=json_extract(pjobs.payload,'$.symbol') AND m.broker_symbol=json_extract(pjobs.payload,'$.broker_symbol') AND m.enabled=1 AND p.enabled=1)",
                 (a["id"],),
             )
+            self.cancel_failed_followups(db, a["id"])
             unresolved = db.execute(
                 "SELECT 1 FROM pjobs WHERE account_id=? AND state IN ('claimed','uncertain')",
                 (a["id"],),
@@ -999,6 +1032,7 @@ class PlatformStore:
             )
             row = db.execute(
                 "SELECT * FROM pjobs WHERE account_id=? AND state='queued'"
+                + " AND NOT (coalesce(json_extract(payload,'$.origin'),'')='analyst' AND json_extract(payload,'$.action')!='entry' AND EXISTS (SELECT 1 FROM pjobs original WHERE original.account_id=pjobs.account_id AND original.feed_id=json_extract(pjobs.payload,'$.signal_id') AND json_extract(original.payload,'$.action')='entry' AND original.state IN ('queued','claimed')))"
                 + clause
                 + " ORDER BY created LIMIT 1",
                 (a["id"],),
@@ -1033,8 +1067,8 @@ class PlatformStore:
                 "UPDATE pjobs SET state=?,result=? WHERE id=?",
                 (result["state"], encoded, job_id),
             )
-            self.event(db, a["user_id"], "execution", result["detail"], a["id"])
             from .source_platform import enqueue_log, master_feedback
+            from .trade_messages import outcome, confirmation
 
             source_feed = db.execute(
                 "SELECT f.* FROM feeds f JOIN analysts n ON n.id=f.analyst_id WHERE f.id=? AND n.source_mode='broker'",
@@ -1042,35 +1076,23 @@ class PlatformStore:
             ).fetchone()
             if source_feed:
                 payload = json.loads(source_feed["payload"])
-                action = payload["action"]
                 source_id = payload.get("broker_source_id", source_feed["source_id"])
-                detail = result["detail"]
-                # Broker errors may include the follower login/server. Keep them private.
+                readable = outcome(db, source_feed, result, job_id)
+                self.event(db, a["user_id"], "execution", readable, a["id"])
+                private = readable
                 for sensitive in (a.get("login"), a.get("server")):
                     if sensitive:
-                        detail = detail.replace(str(sensitive), "[private]")
-                master_feedback(
-                    self,
-                    db,
-                    source_feed["analyst_id"],
-                    f"Source {source_id}: follower {action} {result['state']}: {detail[:300]}",
-                )
+                        private = private.replace(str(sensitive), "[private]")
+                master_feedback(self, db, source_feed["analyst_id"], private)
                 if result["state"] == "executed":
-                    text = payload.get("broker_source_text")
-                    if not text and action == "entry":
-                        # Jobs queued before this update still publish only after execution.
-                        text = f"{payload['symbol']} {payload['side']} CMP\nSL: {payload['sl']}"
-                        if payload.get("tp"):
-                            text += f"\nTP: {payload['tp']}"
                     enqueue_log(
                         db,
                         source_feed["analyst_id"],
                         "source:" + source_feed["analyst_id"] + ":" + source_id,
-                        (text or f"Master {action} update")
-                        + "\nConfirmed executed on at least one follower account."
-                        + "\nOther followers may be pending, skipped or rejected; check private Activity."
-                        + f"\nSource: {source_id}\nLog only; do not resubmit this message.",
+                        confirmation(db, source_feed),
                     )
+            else:
+                self.event(db, a["user_id"], "execution", result["detail"], a["id"])
             if result["state"] == "uncertain":
                 db.execute("UPDATE accounts SET enabled=0 WHERE id=?", (a["id"],))
 
@@ -1167,13 +1189,23 @@ class PlatformStore:
             jobs = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT j.*,f.source_id source_ref FROM pjobs j JOIN accounts a ON a.id=j.account_id LEFT JOIN feeds f ON f.id=j.feed_id WHERE a.user_id=? ORDER BY j.created DESC LIMIT 200",
+                    "SELECT j.*,f.source_id source_ref,n.source_mode FROM pjobs j JOIN accounts a ON a.id=j.account_id LEFT JOIN feeds f ON f.id=j.feed_id LEFT JOIN analysts n ON n.id=f.analyst_id WHERE a.user_id=? ORDER BY j.created DESC LIMIT 200",
                     (user,),
                 )
             ]
             for j in jobs:
                 j["payload"] = json.loads(j["payload"])
                 j["result"] = json.loads(j["result"] or "null")
+                if j["result"] and j.get("source_mode") == "broker":
+                    from .trade_messages import outcome
+
+                    feed = db.execute(
+                        "SELECT * FROM feeds WHERE id=?", (j["feed_id"],)
+                    ).fetchone()
+                    if feed:
+                        j["result"]["user_detail"] = outcome(
+                            db, feed, j["result"], j["id"]
+                        )
                 j.pop("risk", None)
             events = [
                 dict(r)

@@ -405,3 +405,5 @@ test('late community responses cannot restore master data after logout',async()=
   assert.equal(w.location.hash,'#login');assert.ok(!w.document.body.textContent.includes('Private master data'));
  }finally{dom.window.close()}
 });
+
+test('trade failures show a readable explanation with escaped collapsed technical details',async()=>{const d=structuredClone(sample.dashboard);d.events=[{kind:'execution',detail:'Trade was not copied. MT5 could not read the trade request.\nNext step: update the follower bot.\nTechnical details: MT5 error -2 <img src=x onerror=alert(1)>',created:Date.now()/1000}];const{dom,w}=await setup(true,{},d);try{w.location.hash='activity';await tick();const item=w.document.querySelector('.notification');assert.match(item.textContent,/Trade was not copied/);assert.equal(item.querySelector('details').open,false);assert.equal(item.querySelector('summary').textContent,'Technical details');assert.ok(!item.querySelector('img'));assert.match(item.querySelector('details').textContent,/MT5 error -2/)}finally{dom.window.close()}});

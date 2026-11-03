@@ -12,18 +12,41 @@ from goldcopier.signals_v2 import parse_signal
 
 def test_self_hosted_terminal_uses_explicit_env_password(monkeypatch):
     monkeypatch.setenv("MT5_PASSWORD", "local-trading-password")
-    options = terminal_options({"terminal_path": "terminal.exe", "hosting": "self",
-                                "login": "123", "server": "Broker-Demo", "password": None})
-    assert options == {"path": "terminal.exe", "login": 123,
-                       "server": "Broker-Demo", "password": "local-trading-password"}
+    options = terminal_options(
+        {
+            "terminal_path": "terminal.exe",
+            "hosting": "self",
+            "login": "123",
+            "server": "Broker-Demo",
+            "password": None,
+        }
+    )
+    assert options == {
+        "path": "terminal.exe",
+        "login": 123,
+        "server": "Broker-Demo",
+        "password": "local-trading-password",
+    }
 
 
 def test_saved_terminal_login_and_managed_credentials_stay_separate(monkeypatch):
     monkeypatch.delenv("MT5_PASSWORD", raising=False)
-    assert terminal_options({"terminal_path": "terminal.exe", "hosting": "self"}) == {"path": "terminal.exe"}
+    assert terminal_options({"terminal_path": "terminal.exe", "hosting": "self"}) == {
+        "path": "terminal.exe"
+    }
     monkeypatch.setenv("MT5_PASSWORD", "local-password")
-    assert terminal_options({"terminal_path": "terminal.exe", "hosting": "managed",
-                             "login": "123", "server": "Demo", "password": "managed-password"})["password"] == "managed-password"
+    assert (
+        terminal_options(
+            {
+                "terminal_path": "terminal.exe",
+                "hosting": "managed",
+                "login": "123",
+                "server": "Demo",
+                "password": "managed-password",
+            }
+        )["password"]
+        == "managed-password"
+    )
 
 
 class BrokerMT(MT):
@@ -246,3 +269,33 @@ def test_manual_sl_and_tp_are_preserved(connected_v2, tmp_path):
     }
     execute(command, b, l)
     assert len(mt.sent) == before
+
+
+def test_no_take_profit_request_uses_native_float_fields(connected_v2):
+    b, mt = connected_v2
+    checked = []
+
+    def strict_check(request):
+        checked.append(dict(request))
+        if any(type(request[k]) is not float for k in ("volume", "price", "sl", "tp")):
+            return None
+        return Obj(retcode=0)
+
+    mt.order_check = strict_check
+    sig = parse_signal("SELL XAUUSD CMP\nSL: 2710")
+    sig["signal_id"] = "a" * 32
+    assert type(sig["tp"]) is int  # historically sent as 0 to MT5
+    request = b.prepare_entry(sig, Risk().model_dump(), "external-no-tp")
+    assert request["tp"] == 0.0 and type(request["tp"]) is float
+    assert len(checked) == 1
+    assert b.submit(request)["state"] == "executed"
+    assert type(mt.sent[0]["tp"]) is float
+
+
+def test_preflight_reports_terminal_error_without_submitting(connected_v2):
+    b, mt = connected_v2
+    mt.order_check = lambda request: None
+    mt.last_error = lambda: (-2, 'Invalid "tp" argument')
+    with pytest.raises(ValueError, match="MT5 error -2.*tp"):
+        b.prepare_entry(signal(), Risk().model_dump(), "invalid")
+    assert mt.sent == []

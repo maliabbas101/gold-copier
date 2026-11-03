@@ -14,6 +14,8 @@ The authenticated frontend opens at `http://127.0.0.1:8001/#community` when usin
 
 ### Exness app/web trades and Discord confirmations
 
+Logs now show plain trade actions and a short shared trade reference. Private Activity explains failures and offers next steps; technical diagnostics are expandable. See [readable logs and no-TP broker diagnostics](docs/COMMUNITIES.md#readable-trade-logs-and-broker-diagnostics).
+
 A trade opened through Exness app/web is copied when it appears as a new position in the **same connected master trading account**, with a mapped symbol and SL. The app used to submit it does not select a different copying path. Trading on another Exness account or platform does not make it visible to this account's observer.
 
 Discord trade signals are published **after at least one follower reports successful execution**, not merely when the master trade is observed or queued. If all followers are offline, paused, ineligible, or reject the entry, no trade signal is posted. The master and affected follower can inspect private Activity for the reason. A confirmation for one follower does not assert that every subscriber filled. Broker risk checks remain in effect and rejected/uncertain entries are not automatically retried. Discord delivery failures do not block follower execution.

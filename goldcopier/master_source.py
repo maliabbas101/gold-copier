@@ -135,7 +135,7 @@ class MasterObserver:
                                 else "No eligible followers. See Activity."
                             )
                         )
-                    )[:500]
+                    )[:300]
             if event["kind"] == "entry" and not accepted:
                 plan["positions"][event["position"]]["mirrored"] = False
                 plan["positions"][event["position"]]["blocked"] = True

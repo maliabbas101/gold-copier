@@ -527,7 +527,7 @@ def test_external_master_fills_copy_before_discord_publication(
     with w.store.db() as db:
         messages = db.execute("SELECT content FROM discord_outbox").fetchall()
         assert len(messages) == 1
-        assert "BUY CMP" in messages[0][0] and "Confirmed executed" in messages[0][0]
+        assert "XAUUSD BUY" in messages[0][0] and "Trade copied" in messages[0][0]
 
 
 def test_no_eligible_follower_means_no_discord_signal_and_private_master_reason(
@@ -639,7 +639,201 @@ def test_legacy_queue_only_log_is_suppressed_then_recreated_on_execution(
         agent, job["id"], {"state": "executed", "detail": "Broker confirmed fill"}
     )
     assert deliver_one(w.store, client, "test-token")
-    assert (
-        len(sent) == 1
-        and "Confirmed executed" in json.loads(sent[0].content)["content"]
+    assert len(sent) == 1 and "Trade copied" in json.loads(sent[0].content)["content"]
+
+
+def test_exness_style_no_tp_fill_copies_through_strict_mt5_binding(
+    workspace, tmp_path, connected_v2
+):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    p = position()
+    p.tp, p.comment = 0.0, "Exness app"
+    source.mt.positions = (p,)
+    step(source)
+    job = w.store.claim(agent)
+    assert job and not job["signal"]["tp"]
+    b, mt = connected_v2
+    mt.account.login, mt.account.server = int(agent["login"]), agent["server"]
+    b.cfg.update(login=agent["login"], server=agent["server"])
+    mt.order_check = lambda req: (
+        NS(retcode=0)
+        if all(type(req[k]) is float for k in ("volume", "price", "sl", "tp"))
+        else None
     )
+    ledger = Ledger(tmp_path / "strict-no-tp.db")
+    execute(job, b, ledger)
+    outcome = json.loads(
+        ledger.db.execute(
+            "SELECT result FROM operations WHERE id=?", (job["id"],)
+        ).fetchone()[0]
+    )
+    assert outcome["state"] == "executed" and len(mt.sent) == 1
+    w.store.result(agent, job["id"], outcome)
+    with w.store.db() as db:
+        message = db.execute("SELECT content FROM discord_outbox").fetchone()[0]
+    assert "Trade copied" in message and "Take profit: not set yet" in message
+    assert "Source:" not in message and "CMP" not in message and "m-" not in message
+
+
+def test_rejected_entry_does_not_generate_repeated_update_failures(workspace, tmp_path):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    job = w.store.claim(agent)
+    with w.store.db() as db:
+        ref = db.execute(
+            "SELECT source_id FROM feeds WHERE id=?", (job["signal"]["signal_id"],)
+        ).fetchone()[0]
+    w.store.ingest(
+        w.analyst,
+        "protection-before-rejection",
+        f"UPDATE SIGNAL: {ref}\nSL:2696",
+        time.time(),
+        origin="broker",
+    )
+    # Management waits until the original entry resolves.
+    assert w.store.claim(agent) is None
+    w.store.result(
+        agent,
+        job["id"],
+        {
+            "state": "rejected",
+            "detail": 'Broker preflight returned no result. MT5 error -2: Invalid "tp" argument',
+        },
+    )
+    assert w.store.claim(agent) is None
+    w.store.ingest(
+        w.analyst,
+        "close-after-rejection",
+        f"CLOSE SIGNAL: {ref}",
+        time.time(),
+        origin="broker",
+    )
+    with w.store.db() as db:
+        states = [
+            r[0]
+            for r in db.execute(
+                "SELECT state FROM pjobs WHERE account_id=? ORDER BY created",
+                (follower,),
+            )
+        ]
+        assert states == ["rejected", "cancelled"]
+        assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 0
+    events = w.store.dashboard(w.owner)["events"]
+    assert any("original copied trade did not open" in e["detail"] for e in events)
+    assert any("MT5 could not read the trade request" in e["detail"] for e in events)
+    assert any(
+        "Technical details:" in e["detail"] and 'Invalid "tp"' in e["detail"]
+        for e in events
+    )
+
+
+def test_human_trade_reference_stays_the_same_across_copy_and_update(
+    workspace, tmp_path
+):
+    import re
+
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    entry = w.store.claim(agent)
+    w.store.result(
+        agent, entry["id"], {"state": "executed", "detail": "Broker confirmed request"}
+    )
+    p = position(sl=2697)
+    source.mt.positions = (p,)
+    step(source)
+    update = w.store.claim(agent)
+    w.store.result(
+        agent, update["id"], {"state": "executed", "detail": "Broker confirmed request"}
+    )
+    with w.store.db() as db:
+        messages = [
+            r[0]
+            for r in db.execute("SELECT content FROM discord_outbox ORDER BY created")
+        ]
+    assert len(messages) == 2
+    assert (
+        "Trade protection updated" in messages[1] and "Stop loss: 2697" in messages[1]
+    )
+    assert (
+        re.search(r"Trade #[A-F0-9]{8}", messages[0])[0]
+        == re.search(r"Trade #[A-F0-9]{8}", messages[1])[0]
+    )
+    assert all("UPDATE SIGNAL" not in m and "Source:" not in m for m in messages)
+
+
+def test_uncertain_entry_keeps_close_management_available(workspace, tmp_path):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    entry = w.store.claim(agent)
+    with w.store.db() as db:
+        reference = db.execute(
+            "SELECT source_id FROM feeds WHERE id=?", (entry["signal"]["signal_id"],)
+        ).fetchone()[0]
+    w.store.result(
+        agent,
+        entry["id"],
+        {"state": "uncertain", "detail": "Broker response interrupted"},
+    )
+    w.store.ingest(
+        w.analyst,
+        "close-unconfirmed",
+        f"CLOSE SIGNAL: {reference}",
+        time.time(),
+        origin="broker",
+    )
+    close = w.store.claim(agent)
+    assert close and close["signal"]["action"] == "close"
+
+
+def test_legacy_failure_gets_readable_history_without_changing_raw_result(
+    workspace, tmp_path
+):
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    source.mt.positions = (position(),)
+    step(source)
+    job = w.store.claim(agent)
+    raw = {
+        "state": "rejected",
+        "detail": "Broker preflight rejected request: code=none, no broker comment",
+    }
+    with w.store.db() as db:
+        payload = json.loads(
+            db.execute("SELECT payload FROM pjobs WHERE id=?", (job["id"],)).fetchone()[
+                0
+            ]
+        )
+        payload.pop("broker_source_id", None)
+        payload.pop("broker_source_text", None)
+        db.execute(
+            "UPDATE pjobs SET payload=? WHERE id=?", (json.dumps(payload), job["id"])
+        )
+    w.store.result(agent, job["id"], raw)
+    history = w.store.dashboard(w.owner)["jobs"][0]["result"]
+    assert history["detail"] == raw["detail"]
+    assert "MT5 did not return a result" in history["user_detail"]
+    assert "Technical details:" in history["user_detail"]
+    # The extra display summary never alters durable acknowledgement idempotency.
+    w.store.result(agent, job["id"], raw)

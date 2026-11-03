@@ -32,11 +32,30 @@ def deliver_one(store, client, token):
                 # A later successful worker acknowledgement recreates this source log.
                 db.execute("DELETE FROM discord_outbox WHERE id=?", (row["id"],))
                 return True
-            row["content"] = (
-                row["content"].split("\nFollower commands queued:", 1)[0]
-                + "\nConfirmed executed on at least one follower account."
-                + f"\nSource: {source}\nLog only; do not resubmit this message."
+            feed = db.execute(
+                "SELECT f.* FROM feeds f JOIN pjobs j ON j.feed_id=f.id WHERE f.analyst_id=? AND (f.source_id=? OR json_extract(f.payload,'$.source_group')=?) AND j.state='executed' LIMIT 1",
+                (row["analyst_id"], source, source),
+            ).fetchone()
+            from .trade_messages import confirmation
+
+            row["content"] = "[Gold Copier log]\n" + confirmation(db, feed)
+            db.execute(
+                "UPDATE discord_outbox SET content=? WHERE id=?",
+                (row["content"], row["id"]),
             )
+        elif "\nSource: " in row["content"]:
+            # Format older outbox entries from the previous technical log format.
+            source = row["content"].rsplit("\nSource: ", 1)[-1].split("\n", 1)[0]
+            feed = db.execute(
+                "SELECT f.* FROM feeds f JOIN pjobs j ON j.feed_id=f.id WHERE f.analyst_id=? AND f.source_id=? AND j.state='executed' LIMIT 1",
+                (row["analyst_id"], source),
+            ).fetchone()
+            if not feed:
+                db.execute("DELETE FROM discord_outbox WHERE id=?", (row["id"],))
+                return True
+            from .trade_messages import confirmation
+
+            row["content"] = "[Gold Copier log]\n" + confirmation(db, feed)
             db.execute(
                 "UPDATE discord_outbox SET content=? WHERE id=?",
                 (row["content"], row["id"]),

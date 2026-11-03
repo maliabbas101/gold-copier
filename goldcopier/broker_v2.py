@@ -308,10 +308,42 @@ class PlatformBroker(MT5Broker):
             raise ValueError("Equity drawdown stop reached")
 
     def preflight(self, request):
+        # MT5's native binding expects real fields as built-in floats, including
+        # an unset TP (0.0). Integer/foreign scalar values can return None locally.
+        for key in ("volume", "price", "sl", "tp", "stoplimit"):
+            if key in request:
+                request[key] = float(request[key])
+                if not math.isfinite(request[key]):
+                    raise ValueError(f"Invalid non-finite trade request field: {key}")
+        for key in (
+            "action",
+            "magic",
+            "order",
+            "position",
+            "position_by",
+            "type",
+            "deviation",
+            "type_time",
+            "type_filling",
+            "expiration",
+        ):
+            if key in request:
+                value = request[key]
+                request[key] = int(value)
+                if request[key] != value:
+                    raise ValueError(f"Invalid integer trade request field: {key}")
         result = self.mt.order_check(request)
-        if result is None or result.retcode != 0:
+        if result is None:
+            error = self.mt.last_error() if hasattr(self.mt, "last_error") else None
+            reason = (
+                f"MT5 error {error[0]}: {error[1]}"
+                if error
+                else "MT5 did not provide an error code"
+            )
+            raise ValueError("Broker preflight returned no result. " + reason)
+        if result.retcode != 0:
             raise ValueError(
-                f"Broker preflight rejected request: code={getattr(result, 'retcode', 'none')}, {getattr(result, 'comment', 'no broker comment')}"
+                f"Broker preflight rejected request: code={result.retcode}, {getattr(result, 'comment', 'no broker comment')}"
             )
 
     def submit(self, request):

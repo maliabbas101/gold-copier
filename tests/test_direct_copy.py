@@ -527,7 +527,7 @@ def test_external_master_fills_copy_before_discord_publication(
     with w.store.db() as db:
         messages = db.execute("SELECT content FROM discord_outbox").fetchall()
         assert len(messages) == 1
-        assert "XAUUSD BUY" in messages[0][0] and "Trade copied" in messages[0][0]
+        assert "XAUUSD BUY" in messages[0][0] and "Entry: CMP" in messages[0][0]
 
 
 def test_no_eligible_follower_means_no_discord_signal_and_private_master_reason(
@@ -597,7 +597,7 @@ def test_first_success_publishes_once_even_when_other_followers_fail(
     with w.store.db() as db:
         assert db.execute("SELECT COUNT(*) FROM discord_outbox").fetchone()[0] == 1
         assert (
-            "at least one follower"
+            "Entry: CMP"
             in db.execute("SELECT content FROM discord_outbox").fetchone()[0]
         )
 
@@ -639,7 +639,7 @@ def test_legacy_queue_only_log_is_suppressed_then_recreated_on_execution(
         agent, job["id"], {"state": "executed", "detail": "Broker confirmed fill"}
     )
     assert deliver_one(w.store, client, "test-token")
-    assert len(sent) == 1 and "Trade copied" in json.loads(sent[0].content)["content"]
+    assert len(sent) == 1 and "Entry: CMP" in json.loads(sent[0].content)["content"]
 
 
 def test_exness_style_no_tp_fill_copies_through_strict_mt5_binding(
@@ -675,8 +675,8 @@ def test_exness_style_no_tp_fill_copies_through_strict_mt5_binding(
     w.store.result(agent, job["id"], outcome)
     with w.store.db() as db:
         message = db.execute("SELECT content FROM discord_outbox").fetchone()[0]
-    assert "Trade copied" in message and "Take profit: not set yet" in message
-    assert "Source:" not in message and "CMP" not in message and "m-" not in message
+    assert "Entry: CMP" in message and "TP: not set yet (— pips)" in message
+    assert "Source:" not in message and "Entry: CMP" in message and "m-" not in message
 
 
 def test_rejected_entry_does_not_generate_repeated_update_failures(workspace, tmp_path):
@@ -765,9 +765,7 @@ def test_human_trade_reference_stays_the_same_across_copy_and_update(
             for r in db.execute("SELECT content FROM discord_outbox ORDER BY created")
         ]
     assert len(messages) == 2
-    assert (
-        "Trade protection updated" in messages[1] and "Stop loss: 2697" in messages[1]
-    )
+    assert "SL / TP updated" in messages[1] and "SL: 2697" in messages[1]
     assert (
         re.search(r"Trade #[A-F0-9]{8}", messages[0])[0]
         == re.search(r"Trade #[A-F0-9]{8}", messages[1])[0]
@@ -837,3 +835,88 @@ def test_legacy_failure_gets_readable_history_without_changing_raw_result(
     assert "Technical details:" in history["user_detail"]
     # The extra display summary never alters durable acknowledgement idempotency.
     w.store.result(agent, job["id"], raw)
+
+
+def test_signal_style_pip_counts_and_role_header(workspace, tmp_path):
+    from goldcopier.trade_messages import confirmation
+
+    w = workspace
+    follower = add_account(w)
+    _, agent = worker_ready(w, follower)
+    source = source_setup(w, tmp_path)
+    step(source)
+    p = position()
+    p.type, p.price_open, p.sl, p.tp = 1, 3920.0, 3927.192, 3912.91
+    source.mt.positions = (p,)
+    step(source)
+    job = w.store.claim(agent)
+    assert job["signal"]["master_entry"] == 3920.0
+    w.store.result(
+        agent, job["id"], {"state": "executed", "detail": "Broker confirmed request"}
+    )
+    with w.store.db() as db:
+        # Configuring a community after the mock fill avoids changing this legacy follower's entitlement setup.
+        db.execute(
+            "INSERT INTO communities(id,owner_id,name,analyst_id,invite_token,access_mode,monthly_cents,created,discord_role_ids) VALUES(?,?,?,?,?,'manual',100,?,?)",
+            (
+                "test-community",
+                w.owner,
+                "Gold",
+                w.analyst,
+                "test-invite",
+                time.time(),
+                json.dumps(["123", "456"]),
+            ),
+        )
+        feed = db.execute(
+            "SELECT * FROM feeds WHERE id=?", (job["signal"]["signal_id"],)
+        ).fetchone()
+        text = confirmation(db, feed)
+    assert text.startswith("**<@&123>** <@&456>\nXAUUSD SELL · Trade #")
+    assert "\nEntry: CMP\nSL: 3927.192 (-71.92 pips)\nTP: 3912.91 (+70.9 pips)" in text
+    assert "[Gold Copier log]" not in text and "Source:" not in text
+
+
+def test_new_signal_format_cannot_be_reingested(workspace):
+    from test_platform import discord_message
+    from goldcopier.discord_platform import feeds
+
+    message = discord_message()
+    message.content = "**<@&123>** <@&456>\nXAUUSD SELL · Trade #A1B2C3D4\nEntry: CMP\nSL: 3927.192 (-60 pips)"
+    assert feeds(workspace.store, message) == []
+
+
+def test_display_pip_units_are_explicit_and_missing_basis_is_not_invented(
+    workspace, monkeypatch
+):
+    from goldcopier.trade_messages import pip_size, confirmation
+    from decimal import Decimal
+
+    assert pip_size("XAUUSD") == Decimal("0.1")
+    assert pip_size("EURUSD") == Decimal("0.0001")
+    assert pip_size("USDJPY") == Decimal("0.01")
+    assert pip_size("BTCUSD") is None
+    monkeypatch.setenv("DISCORD_PIP_SIZES", '{"BTCUSD": 1, "XAUUSD": 0.01}')
+    assert pip_size("BTCUSD") == 1 and pip_size("XAUUSD") == Decimal("0.01")
+    monkeypatch.setenv("DISCORD_PIP_SIZES", '{"XAUUSD": 0}')
+    assert (
+        pip_size("XAUUSD") is None
+    )  # bad display configuration never blocks a trade acknowledgement
+    p = {
+        "action": "entry",
+        "symbol": "XAUUSD",
+        "side": "SELL",
+        "entry": None,
+        "sl": 3927.192,
+        "tp": 0,
+    }
+    with workspace.store.db() as db:
+        text = confirmation(
+            db,
+            {
+                "id": "a1b2c3d4",
+                "analyst_id": workspace.analyst,
+                "payload": json.dumps(p),
+            },
+        )
+    assert "SL: 3927.192 (— pips)" in text

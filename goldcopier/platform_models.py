@@ -135,6 +135,7 @@ class Ingest(Model):
     source_id: str = Field(min_length=1, max_length=100)
     text: str = Field(max_length=4000)
     created: float
+    master_entry: float | None = Field(default=None, gt=0)
 
 
 class Resolve(Model):
@@ -199,6 +200,18 @@ class ExistingSource(Model):
 
 class CommunityChannel(Model):
     discord_channel: str = Field(max_length=300)
+    discord_role_ids: list[str] | None = Field(default=None, max_length=2)
+
+    @model_validator(mode="after")
+    def role_ids(self):
+        if self.discord_role_ids is not None:
+            if any(
+                not role.isascii() or not role.isdigit() or len(role) > 24
+                for role in self.discord_role_ids
+            ):
+                raise ValueError("Enter numeric Discord role IDs")
+            self.discord_role_ids = list(dict.fromkeys(self.discord_role_ids))
+        return self
 
 
 class HostingStatus(Model):

@@ -106,7 +106,16 @@ def install(app, store, vault, billing, base, user, paid, live, demo=False):
         with store.db() as db:
             from .community_discord import request_channel
 
-            request_channel(db, cid, current["id"], body.discord_channel)
+            current_channel = C.owned(db, current["id"], cid)[
+                "discord_requested_channel"
+            ]
+            if C.channel_id(body.discord_channel) != (current_channel or ""):
+                request_channel(db, cid, current["id"], body.discord_channel)
+            if body.discord_role_ids is not None:
+                db.execute(
+                    "UPDATE communities SET discord_role_ids=? WHERE id=?",
+                    (json.dumps(body.discord_role_ids), cid),
+                )
         return {"ok": True}
 
     @app.post("/api/communities/{cid}/discord-connect")

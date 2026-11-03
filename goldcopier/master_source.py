@@ -223,6 +223,10 @@ class MasterObserver:
                         "source_id": source_id,
                         "text": text,
                         "created": now,
+                        "master_entry": (
+                            current.get(ident)
+                            or previous.get(ident, {}).get("data", {})
+                        ).get("entry"),
                     },
                 }
             )

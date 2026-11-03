@@ -489,6 +489,7 @@ class PlatformStore:
         billing=False,
         reference_id=None,
         origin="discord",
+        master_entry=None,
     ):
         from .instruments import canonical
 
@@ -645,6 +646,8 @@ class PlatformStore:
                 for payload in payloads:
                     payload["broker_source_text"] = text
                     payload["broker_source_id"] = source_id
+                    if master_entry is not None:
+                        payload["master_entry"] = master_entry
             queued = 0
             ids = []
             skipped = []
@@ -1090,6 +1093,7 @@ class PlatformStore:
                         source_feed["analyst_id"],
                         "source:" + source_feed["analyst_id"] + ":" + source_id,
                         confirmation(db, source_feed),
+                        formatted=True,
                     )
             else:
                 self.event(db, a["user_id"], "execution", result["detail"], a["id"])

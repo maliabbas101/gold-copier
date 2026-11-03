@@ -38,7 +38,7 @@ def deliver_one(store, client, token):
             ).fetchone()
             from .trade_messages import confirmation
 
-            row["content"] = "[Gold Copier log]\n" + confirmation(db, feed)
+            row["content"] = confirmation(db, feed)
             db.execute(
                 "UPDATE discord_outbox SET content=? WHERE id=?",
                 (row["content"], row["id"]),
@@ -55,11 +55,19 @@ def deliver_one(store, client, token):
                 return True
             from .trade_messages import confirmation
 
-            row["content"] = "[Gold Copier log]\n" + confirmation(db, feed)
+            row["content"] = confirmation(db, feed)
             db.execute(
                 "UPDATE discord_outbox SET content=? WHERE id=?",
                 (row["content"], row["id"]),
             )
+        from .trade_messages import configured_roles
+
+        allowed_roles = [
+            role
+            for role in configured_roles(db, row["analyst_id"])
+            if f"<@&{role}>" in row["content"]
+        ]
+        mentions = {"parse": [], **({"roles": allowed_roles} if allowed_roles else {})}
         db.execute(
             "UPDATE discord_outbox SET state='sending',attempts=attempts+1,next_attempt=? WHERE id=?",
             (now + 30, row["id"]),
@@ -70,7 +78,7 @@ def deliver_one(store, client, token):
             headers={"Authorization": "Bot " + token},
             json={
                 "content": row["content"],
-                "allowed_mentions": {"parse": []},
+                "allowed_mentions": mentions,
                 "nonce": row["id"][:24],
                 "enforce_nonce": True,
             },

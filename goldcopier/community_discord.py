@@ -20,6 +20,10 @@ def migrate(db):
     ):
         if name not in columns:
             db.execute(f"ALTER TABLE communities ADD COLUMN {name} TEXT")
+    if "discord_role_ids" not in columns:
+        db.execute(
+            "ALTER TABLE communities ADD COLUMN discord_role_ids TEXT NOT NULL DEFAULT '[]'"
+        )
     db.execute(
         "CREATE TABLE IF NOT EXISTS community_discord_states(digest TEXT PRIMARY KEY,community_id TEXT NOT NULL,user_id TEXT NOT NULL,session_digest TEXT NOT NULL,expires REAL NOT NULL)"
     )

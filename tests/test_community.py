@@ -538,6 +538,13 @@ def test_discord_destination_requires_own_server_authorization(
     )["state"][0]
     if manage:
         oauth.complete(state, "code")
+        saved = w.client.put(
+            f"/api/communities/{cid}/channel",
+            json={"discord_channel": "456", "discord_role_ids": ["123"]},
+        )
+        assert (
+            saved.status_code == 200
+        )  # editing roles must not revoke the authorized channel
         with pytest.raises(ValueError):
             oauth.complete(state, "replayed-code")
     else:
@@ -567,3 +574,51 @@ def test_discord_callback_rejects_revoked_browser_session(workspace, monkeypatch
         db.execute("DELETE FROM sessions WHERE user_id=?", (w.owner,))
     with pytest.raises(ValueError, match="revoked"):
         oauth.complete(state, "code")
+
+
+def test_master_configures_only_explicit_discord_roles(workspace):
+    import httpx
+    from goldcopier.source_platform import enqueue_log
+    from goldcopier.discord_logs import deliver_one
+
+    w = workspace
+    cid, _ = create(w)
+    url = f"/api/communities/{cid}/channel"
+    response = w.client.put(
+        url, json={"discord_channel": "456", "discord_role_ids": ["123", "789"]}
+    )
+    assert response.status_code == 200, response.text
+    master = w.client.get("/api/community").json()["masters"][0]
+    assert master["discord_role_ids"] == ["123", "789"]
+    with w.store.db() as db:
+        analyst = db.execute(
+            "SELECT analyst_id FROM communities WHERE id=?", (cid,)
+        ).fetchone()[0]
+        enqueue_log(
+            db,
+            analyst,
+            "roles",
+            "**<@&123>** <@&789> <@&999> @everyone\nXAUUSD SELL · Trade #A1B2C3D4",
+            formatted=True,
+        )
+    sent = []
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda req: sent.append(json.loads(req.content)) or httpx.Response(200)
+        )
+    )
+    assert deliver_one(w.store, client, "test-token")
+    assert sent[0]["allowed_mentions"] == {"parse": [], "roles": ["123", "789"]}
+    assert (
+        w.client.put(
+            url, json={"discord_channel": "456", "discord_role_ids": ["@everyone"]}
+        ).status_code
+        == 422
+    )
+    login(w, "other@example.com", "another-test-password")
+    assert (
+        w.client.put(
+            url, json={"discord_channel": "456", "discord_role_ids": ["999"]}
+        ).status_code
+        == 400
+    )

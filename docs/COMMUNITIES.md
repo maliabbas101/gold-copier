@@ -40,18 +40,21 @@ One community is currently supported per master login and one connected child ac
 
 ## Readable trade logs and broker diagnostics
 
-Discord confirmations use a short stable trade reference, plain action names, and full Stop loss / Take profit labels. The same reference follows a copied trade through protection updates and closure. Internal source IDs and worker job IDs remain in private technical details. Failure explanations and suggested next steps appear in Activity; the frontend collapses the technical details by default. No unsuccessful trade is announced as copied.
+Discord confirmations use a short stable trade reference, plain action names, compact SL/TP labels, and signed pip counts. The same reference follows a copied trade through protection updates and closure. Internal source IDs and worker job IDs remain in private technical details. Failure explanations and suggested next steps appear in Activity; the frontend collapses the technical details by default. No unsuccessful trade is announced as copied.
 
 Example confirmation (illustrative):
 
 ```text
-✅ Trade copied
+**@Community** @Forex Alert
 XAUUSD SELL · Trade #A1B2C3D4
-Entry: current market price
-Stop loss: 3927.192
-Take profit: not set yet
-Copied to at least one follower account.
+Entry: CMP
+SL: 3927.192 (-71.92 pips)
+TP: not set yet (— pips)
 ```
+
+Configure up to two alert role IDs in **Community → Choose Discord channel**. The first role mention is bold. Copy the role IDs from Discord Developer Mode; allow the bot to mention these roles (or make the roles mentionable). Only the configured roles are enabled in the outbound mention allowlist. Role names in the example are illustrative; Discord resolves your saved IDs. The compact public signal is still sent only after at least one follower executes.
+
+Pip counts use the master's actual opening price while the displayed entry remains CMP. Signed counts show loss/profit direction for BUY/SELL. Gold defaults to a $0.10 move per pip, matching this project's earlier signal examples; supported currency pairs default to 0.0001, or 0.01 for JPY quotes. To use another display convention, set `DISCORD_PIP_SIZES={"XAUUSD":0.1,"BTCUSD":1}` on the API and Discord sender. This setting affects display only. Unknown instruments, legacy events without an entry price, and an unset TP show `— pips` rather than fabricated counts. Different follower fills may have different pip distances.
 
 A missing MT5 `order_check` result is now recorded with `last_error()` rather than `code=none`. Real request fields, including an unset TP, are converted to built-in floats before checking and sending; IDs and enumeration fields use integers. This covers the no-TP format often seen when opening a trade in the Exness app and adding TP later. The request still requires broker preflight approval; a failed check is not bypassed or automatically resubmitted.
 

@@ -1,6 +1,8 @@
 """Plain-language trade updates with stable human references and optional diagnostics."""
 
 import json
+import os
+from decimal import Decimal, InvalidOperation
 import re
 
 
@@ -18,42 +20,96 @@ def context(db, feed_id, payload):
     return f"{label} · Trade #{original_id[:8].upper()}"
 
 
+def configured_roles(db, analyst_id):
+    row = db.execute(
+        "SELECT discord_role_ids FROM communities WHERE analyst_id=?", (analyst_id,)
+    ).fetchone()
+    return json.loads(row[0]) if row else []
+
+
+def pip_size(symbol):
+    # These are display units, independent of broker quote precision and risk sizing.
+    try:
+        overrides = json.loads(os.environ.get("DISCORD_PIP_SIZES") or "{}")
+        if not isinstance(overrides, dict):
+            overrides = {}
+    except (ValueError, TypeError):
+        overrides = {}
+    currencies = {"USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
+    default = (
+        0.1
+        if symbol == "XAUUSD"
+        else (0.01 if symbol.endswith("JPY") else 0.0001)
+        if len(symbol) == 6 and symbol[:3] in currencies and symbol[3:] in currencies
+        else None
+    )
+    value = overrides.get(symbol, default)
+    if value is None:
+        return None
+    try:
+        unit = Decimal(str(value))
+        return unit if unit.is_finite() and unit > 0 else None
+    except (ValueError, TypeError, InvalidOperation):
+        return None
+
+
 def confirmation(db, feed):
     p = json.loads(feed["payload"])
+    original = db.execute(
+        "SELECT payload FROM feeds WHERE id=?", (p.get("signal_id", feed["id"]),)
+    ).fetchone()
+    original = json.loads(original[0]) if original else p
+    symbol = original.get("symbol", p.get("symbol", ""))
+    side = original.get("side", p.get("side", "BUY"))
+    basis = (
+        original.get("master_entry") or p.get("master_entry") or original.get("entry")
+    )
+    unit = pip_size(symbol)
+
+    def distance(value):
+        if basis is None or unit is None:
+            return "— pips"
+        signed = (
+            (Decimal(str(value)) - Decimal(str(basis)))
+            * (1 if side == "BUY" else -1)
+            / unit
+        )
+        prefix = "+" if signed > 0 else ""
+        return f"{prefix}{number(signed)} pips"
+
+    roles = configured_roles(db, feed["analyst_id"])
+    mentions = (
+        ([f"**<@&{roles[0]}>**"] + [f"<@&{role}>" for role in roles[1:]])
+        if roles
+        else []
+    )
+    lines = ([" ".join(mentions)] if mentions else []) + [context(db, feed["id"], p)]
     action = p["action"]
-    title = {
-        "entry": "✅ Trade copied",
-        "modify": "🛡 Trade protection updated",
-        "breakeven": "🛡 Stop loss moved to breakeven",
-        "close": "✅ Trade closed",
-        "partial": "✅ Trade partially closed",
-        "cancel": "✅ Pending order cancelled",
-    }.get(action, "✅ Trade updated")
-    lines = [title, context(db, feed["id"], p)]
     if action == "entry":
         lines.append(
-            "Entry: current market price"
-            if p.get("entry") is None
-            else f"Entry: {number(p['entry'])}"
+            "Entry: CMP" if p.get("entry") is None else f"Entry: {number(p['entry'])}"
+        )
+    else:
+        lines.append(
+            {
+                "modify": "SL / TP updated",
+                "breakeven": "SL moved to breakeven",
+                "close": "Trade closed",
+                "partial": "Trade partially closed",
+                "cancel": "Pending order cancelled",
+            }.get(action, "Trade updated")
         )
     if "sl" in p:
-        lines.append(f"Stop loss: {number(p['sl'])}")
+        lines.append(f"SL: {number(p['sl'])} ({distance(p['sl'])})")
     if "tp" in p or "targets" in p:
         targets = p.get("targets") or ([p["tp"]] if p.get("tp") else [])
-        lines.append(
-            "Take profit: "
-            + (" / ".join(number(t) for t in targets) if targets else "not set yet")
-        )
+        if not targets:
+            lines.append("TP: not set yet (— pips)")
+        for i, target in enumerate(targets):
+            label = f"TP{i + 1}" if len(targets) > 1 else "TP"
+            lines.append(f"{label}: {number(target)} ({distance(target)})")
     if action == "partial":
-        lines.append(f"Portion to close: {number(p.get('percent', 100))}%")
-    lines.append(
-        "Copied to at least one follower account."
-        if action == "entry"
-        else "Applied to at least one follower account."
-    )
-    lines.append(
-        "Each follower uses their own risk settings; some accounts may not copy."
-    )
+        lines.append(f"Close: {number(p.get('percent', 100))}%")
     return "\n".join(lines)
 
 

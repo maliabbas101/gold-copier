@@ -274,6 +274,7 @@ def view(store, user_id, billing, base):
         masters = []
         for raw in db.execute("SELECT * FROM communities WHERE owner_id=?", (user_id,)):
             c = dict(raw)
+            c["discord_role_ids"] = json.loads(c["discord_role_ids"])
             c["invite_url"] = base + "/#join/" + c.pop("invite_token")
             c["licensed"] = master_licensed(db, user_id, billing)
             source = db.execute(

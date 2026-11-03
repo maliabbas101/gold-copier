@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 
 import discord
 
@@ -9,7 +10,9 @@ from .platform_store import PlatformStore
 
 
 def feeds(store, message, listener_id=None):
-    if (message.content or "").startswith("[Gold Copier log]"):
+    if (message.content or "").startswith("[Gold Copier log]") or re.search(
+        r"\bTrade #[A-F0-9]{8}\b", (message.content or "")[:300]
+    ):
         return []
     if (
         not message.guild

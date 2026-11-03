@@ -98,7 +98,7 @@ def configure_source(store, user_id, body):
         return source_config(db, a["id"])
 
 
-def enqueue_log(db, analyst_id, key, content):
+def enqueue_log(db, analyst_id, key, content, formatted=False):
     analyst = db.execute(
         "SELECT channel_id FROM analysts WHERE id=?", (analyst_id,)
     ).fetchone()
@@ -111,7 +111,7 @@ def enqueue_log(db, analyst_id, key, content):
             ident,
             analyst_id,
             analyst["channel_id"],
-            ("[Gold Copier log]\n" + content)[:1900],
+            (content if formatted else "[Gold Copier log]\n" + content)[:1900],
             time.time(),
             "pending" if analyst["channel_id"] else "not_configured",
             None

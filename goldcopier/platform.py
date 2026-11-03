@@ -576,6 +576,7 @@ def create_app():
             body.created,
             billing=paid,
             origin="broker",
+            master_entry=body.master_entry,
         )
 
     @app.get("/api/worker/master-events/{source_id}")

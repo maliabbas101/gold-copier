@@ -19,3 +19,8 @@ node_modules/
 master-state.json
 .demo/
 .local-runtime/
+
+# Local-only context docs (not part of the product)
+PROJECT_CONTEXT.md
+STRATEGY.md
+local-dev/

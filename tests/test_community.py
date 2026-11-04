@@ -464,6 +464,49 @@ def test_normal_master_has_own_dashboard_without_global_operator_access(workspac
         assert not C.master_licensed(db, w.other, True)
 
 
+def test_fleet_dashboard_aggregates_every_master_for_the_admin_only(
+    workspace, monkeypatch
+):
+    w = workspace
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "s" * 48)
+    login(w, "other@example.com", "another-test-password")
+    cid_a, invite_a = create(w)
+    third = w.store.signup("Third", "third@example.com", "third-test-password")
+    login(w, "third@example.com", "third-test-password")
+    join(w, invite_a)
+    login(w, "other@example.com", "another-test-password")
+    grant(w, cid_a, third)
+    login(w, "third@example.com", "third-test-password")
+    connect(w, cid_a, "222222")
+    login(w, "other@example.com", "another-test-password")
+    own_view = w.client.get("/api/community").json()["masters"][0]
+    assert w.client.get("/api/operator/communities").status_code == 403
+
+    fourth = w.store.signup("Fourth", "fourth@example.com", "fourth-test-password")
+    login(w, "fourth@example.com", "fourth-test-password")
+    cid_b, _ = create(w)
+
+    login(w)
+    response = w.client.get("/api/operator/communities")
+    assert response.status_code == 200, response.text
+    rows = {c["id"]: c for c in response.json()["communities"]}
+    assert set(rows) == {cid_a, cid_b}
+    a = rows[cid_a]
+    assert a["owner_email"] == "other@example.com"
+    assert a["member_total"] == 1
+    assert a["member_counts"].get("granted") == 1
+    assert a["bot_connected"] == 1
+    assert a["bot_total"] == 1
+    assert "invite_token" not in a
+    # The shared discord_status() helper must agree between the master's own
+    # view and the admin's cross-community fleet view.
+    assert a["discord_status"] == own_view["discord_status"]
+    b = rows[cid_b]
+    assert b["owner_email"] == "fourth@example.com"
+    assert b["member_total"] == 0
+    assert b["bot_connected"] == 0
+
+
 def test_child_worker_environment_does_not_inherit_parent_or_service_secrets():
     from goldcopier.supervisor import worker_environment
 

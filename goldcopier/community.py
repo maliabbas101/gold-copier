@@ -90,6 +90,19 @@ def channel_id(value):
     raise ValueError("Paste a Discord channel link or channel ID")
 
 
+def discord_status(c):
+    """Shared by view() and fleet() so the master and admin views never disagree."""
+    return (
+        "error"
+        if c.get("discord_error")
+        else "verified"
+        if c.get("discord_verified_guild")
+        else "pending"
+        if c.get("discord_requested_channel")
+        else "not_requested"
+    )
+
+
 def create(store, user_id, body, billing):
     now = time.time()
     ident = uuid.uuid4().hex
@@ -275,6 +288,7 @@ def view(store, user_id, billing, base):
         for raw in db.execute("SELECT * FROM communities WHERE owner_id=?", (user_id,)):
             c = dict(raw)
             c["discord_role_ids"] = json.loads(c["discord_role_ids"])
+            c["discord_status"] = discord_status(c)
             c["invite_url"] = base + "/#join/" + c.pop("invite_token")
             c["licensed"] = master_licensed(db, user_id, billing)
             source = db.execute(
@@ -342,3 +356,53 @@ def view(store, user_id, billing, base):
             "payments_enabled": billing,
             "server_time": time.time(),
         }
+
+
+def fleet(store):
+    """Admin-only cross-community inventory. Read-only aggregation; no capacity math
+    here -- source['connector']/bots[]['connector'] (mt5 vs exness) are the fields an
+    operator would manually tally against the terminal-pool sizing note in
+    docs/COMMUNITIES.md ("size capacity for the master plus all connected followers")."""
+    with store.db() as db:
+        rows = []
+        for raw in db.execute(
+            "SELECT c.*,u.name owner_name,u.email owner_email FROM communities c "
+            "JOIN users u ON u.id=c.owner_id ORDER BY c.created"
+        ):
+            c = dict(raw)
+            c["discord_role_ids"] = json.loads(c["discord_role_ids"])
+            c["discord_status"] = discord_status(c)
+            c.pop("invite_token")
+            source = db.execute(
+                "SELECT s.account_id,a.name account_name,a.heartbeat,a.disconnected,a.connector,"
+                "json_extract(a.snapshot,'$.source_status') source_status "
+                "FROM master_sources s JOIN accounts a ON a.id=s.account_id WHERE s.analyst_id=?",
+                (c["analyst_id"],),
+            ).fetchone()
+            c["source"] = dict(source) if source else None
+            c["member_counts"] = {
+                row["status"]: row["n"]
+                for row in db.execute(
+                    "SELECT status,COUNT(*) n FROM community_memberships WHERE community_id=? GROUP BY status",
+                    (c["id"],),
+                )
+            }
+            c["member_blocked"] = db.execute(
+                "SELECT COUNT(*) FROM community_memberships WHERE community_id=? AND blocked=1",
+                (c["id"],),
+            ).fetchone()[0]
+            c["member_total"] = sum(c["member_counts"].values())
+            bots = [
+                dict(b)
+                for b in db.execute(
+                    "SELECT b.id,b.user_id,b.account_id,b.desired_enabled,a.enabled account_enabled,"
+                    "a.heartbeat,a.disconnected,a.connector FROM community_bots b "
+                    "LEFT JOIN accounts a ON a.id=b.account_id WHERE b.community_id=?",
+                    (c["id"],),
+                )
+            ]
+            c["bots"] = bots
+            c["bot_total"] = len(bots)
+            c["bot_connected"] = sum(1 for b in bots if b["account_id"])
+            rows.append(c)
+        return {"communities": rows, "server_time": time.time()}

@@ -718,6 +718,12 @@ def create_app():
             "analysts": analysts,
         }
 
+    @app.get("/api/operator/communities")
+    def operator_fleet(current=Depends(admin)):
+        from .community import fleet
+
+        return fleet(store)
+
     @app.post("/api/operator/analysts")
     def analyst(body: M.Analyst, current=Depends(admin)):
         return {"id": store.add_analyst(body.model_dump())}

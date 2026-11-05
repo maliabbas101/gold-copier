@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -13,6 +14,14 @@ import httpx
 
 from .broker_v2 import PlatformBroker
 from .platform_store import dump
+
+
+def worker_poll_interval():
+    """Bound idle polling so configuration cannot create a busy loop."""
+    value = float(os.environ.get("WORKER_POLL_INTERVAL", "0.2"))
+    if not math.isfinite(value) or not 0.1 <= value <= 5:
+        raise ValueError("WORKER_POLL_INTERVAL must be between 0.1 and 5 seconds")
+    return value
 
 
 class Ledger:
@@ -388,6 +397,7 @@ def main():
     from .runtime import find_terminal, load_env
 
     load_env(os.environ.get("COPIER_ENV_FILE") or ".env")
+    poll_interval = worker_poll_interval()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
@@ -455,6 +465,7 @@ def main():
             from .master_source import MasterObserver
 
             observer = MasterObserver(broker, ledger, client)
+            last_follower_heartbeat = float("-inf")
             while True:
                 # Validate the token before software-managed exits. A revoked worker must terminate.
                 try:
@@ -514,18 +525,20 @@ def main():
                     continue
                 monitor(broker, ledger)
                 try:
-                    snap = broker.snapshot()
-                    try:
-                        broker.protection(cfg["risk"], broker.check_account())
-                    except ValueError as exc:
-                        snap["error"] = str(exc)
-                    ledger.save_baseline(broker.baseline)
-                    if ledger.unresolved():
-                        snap["error"] = (
-                            "Uncertain local operation; operator reconciliation required"
-                        )
-                    response = client.post("/api/worker/heartbeat", json=snap)
-                    response.raise_for_status()
+                    if time.monotonic() - last_follower_heartbeat >= 1:
+                        snap = broker.snapshot()
+                        try:
+                            broker.protection(cfg["risk"], broker.check_account())
+                        except ValueError as exc:
+                            snap["error"] = str(exc)
+                        ledger.save_baseline(broker.baseline)
+                        if ledger.unresolved():
+                            snap["error"] = (
+                                "Uncertain local operation; operator reconciliation required"
+                            )
+                        response = client.post("/api/worker/heartbeat", json=snap)
+                        response.raise_for_status()
+                        last_follower_heartbeat = time.monotonic()
                     ledger.sync(client)
                     # Management commands remain eligible when entries are paused or uncertain.
                     for _ in range(8):
@@ -553,7 +566,9 @@ def main():
                     logging.exception(
                         "Worker synchronization failed; entries are not resent"
                     )
-                time.sleep(1)
+                    time.sleep(1)
+                    continue
+                time.sleep(poll_interval)
     finally:
         if broker:
             broker.mt.shutdown()

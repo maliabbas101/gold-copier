@@ -129,6 +129,14 @@ assignments are needed. Start it with:
 python -m goldcopier.platform_agent
 ```
 
+Follower workers wait 0.2 seconds between successful polling cycles by default.
+Set `WORKER_POLL_INTERVAL` to a value from 0.1 to 5 seconds to tune this idle
+delay. Network and broker calls add to the cycle time; this is not an execution
+latency guarantee. Authorization is refreshed each cycle, follower heartbeats
+are sent about once per second, and synchronization failures back off for one
+second. Faster polling increases API traffic. Restart workers after updating
+their code or settings; remote Windows workers need the updated code too.
+
 Use `python -m goldcopier.manage run` instead when you want the server, Discord
 listener and local worker started together. Do not run both commands for the same
 account. Existing shell variables override `.env`; use a fresh shell when replacing

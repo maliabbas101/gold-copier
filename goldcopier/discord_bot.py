@@ -10,8 +10,9 @@ from .signals import parse
 from .store import Store
 
 
-def authorized_message(message, cfg):
-    return (message.guild is not None and message.webhook_id is None and not message.author.bot
+def authorized_message(message, cfg, listener_id=None):
+    return (message.guild is not None and message.webhook_id is None
+            and (listener_id is None or message.author.id != listener_id)
             and str(message.guild.id) == str(cfg['guild_id'])
             and str(message.channel.id) == str(cfg['channel_id'])
             and str(message.author.id) == str(cfg['trader_id']))
@@ -33,7 +34,7 @@ def main():
 
     @client.event
     async def on_message(message):
-        if not authorized_message(message, cfg):
+        if not authorized_message(message, cfg, client.user.id if client.user else None):
             return
         try:
             signal = parse(message.content)

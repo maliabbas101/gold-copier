@@ -1,0 +1,8 @@
+{
+  "name": "gold-copier-ui-tests",
+  "private": true,
+  "version": "0.2.0",
+  "description": "DOM integration tests for the bundled frontend; no frontend build step required",
+  "scripts": { "test": "node --test tests/ui.test.cjs" },
+  "devDependencies": { "jsdom": "26.1.0" }
+}

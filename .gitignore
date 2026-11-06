@@ -8,3 +8,14 @@ config.json
 agent.json
 PAUSE
 pytest-of-root/
+
+*.lock
+.env.*
+!.env.example
+pool-state/
+terminal-pool.json
+artifacts/
+node_modules/
+master-state.json
+.demo/
+.local-runtime/

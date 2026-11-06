@@ -461,6 +461,34 @@ def main():
                         "Check the MT5 login and server in the app and MT5_PASSWORD "
                         "in .env (or the terminal's saved login), then restart the server."
                     )
+                if cfg["mode"] == "auto":
+                    account = mt.account_info()
+                    if (
+                        account is None
+                        or str(account.login) != cfg["login"]
+                        or account.server != cfg["server"]
+                    ):
+                        raise ValueError("Check your MT5 server and login")
+                    cfg["mode"] = (
+                        "demo"
+                        if account.trade_mode == mt.ACCOUNT_TRADE_MODE_DEMO
+                        else "live"
+                    )
+                    if cfg["mode"] == "live" and not cfg["allow_live"]:
+                        response = client.post(
+                            "/api/worker/heartbeat",
+                            json={
+                                "login": cfg["login"],
+                                "server": cfg["server"],
+                                "mode": "live",
+                                "balance": 0,
+                                "equity": 0,
+                                "currency": "",
+                                "error": "This is a live account. Live copying is disabled here. Connect a demo account.",
+                            },
+                        )
+                        response.raise_for_status()
+                        return
                 broker = PlatformBroker(cfg, mt)
             from .master_source import MasterObserver
 
@@ -483,6 +511,7 @@ def main():
                     cfg["master_source"] = updated.get("master_source")
                     cfg["risk"] = updated["risk"]
                     cfg["pairs"] = updated.get("pairs", [])
+                    cfg["symbol"] = updated["symbol"]
                     cfg["enabled"] = updated["enabled"]
                     cfg["allow_live"] = (
                         updated["allow_live"]

@@ -366,15 +366,14 @@ test('subscriber connects a generated child bot without choosing analyst IDs or 
  const{dom,w,calls}=await setup(true,{demo:false});
  try{
   const original=w.fetch;w.fetch=async(url,opt={})=>url==='/api/community'?{ok:true,status:200,json:async()=>structuredClone(state)}:original(url,opt);
-  w.location.hash='community';await tick();assert.match(w.document.querySelector('.content').textContent,/personal child bot has been generated/);
+  w.location.hash='community';await tick();assert.match(w.document.querySelector('.content').textContent,/Connect your MT5 account/);
   w.document.querySelector('[data-action="community-connect-child"]').click();await tick();
-  const f=w.document.querySelector('#community-broker-form');assert.ok(f);
+  const f=w.document.querySelector('#guided-connect-form');assert.ok(f);
   assert.ok(!f.querySelector('[name="analyst_id"], [name="AGENT_TOKEN"], [name="hosting"]'));
   f.elements.namedItem('login').value='222222';f.elements.namedItem('server').value='Broker-Demo';f.elements.namedItem('password').value='private-password';
-  f.querySelector('#community-consent').checked=true;
   f.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
   const call=calls.find(c=>c.url==='/api/communities/parent-a/child-bot');assert.ok(call);
-  const body=JSON.parse(call.opt.body);assert.equal(body.login,'222222');assert.equal(body.consent,true);
+  const body=JSON.parse(call.opt.body);assert.deepEqual(body,{login:'222222',server:'Broker-Demo',password:'private-password'});
   assert.equal(body.analyst_id,undefined);assert.equal(body.community_id,undefined);
  }finally{dom.window.close()}
 });
@@ -409,3 +408,35 @@ test('late community responses cannot restore master data after logout',async()=
 test('trade failures show a readable explanation with escaped collapsed technical details',async()=>{const d=structuredClone(sample.dashboard);d.events=[{kind:'execution',detail:'Trade was not copied. MT5 could not read the trade request.\nNext step: update the follower bot.\nTechnical details: MT5 error -2 <img src=x onerror=alert(1)>',created:Date.now()/1000}];const{dom,w}=await setup(true,{},d);try{w.location.hash='activity';await tick();const item=w.document.querySelector('.notification');assert.match(item.textContent,/Trade was not copied/);assert.equal(item.querySelector('details').open,false);assert.equal(item.querySelector('summary').textContent,'Technical details');assert.ok(!item.querySelector('img'));assert.match(item.querySelector('details').textContent,/MT5 error -2/)}finally{dom.window.close()}});
 
 test('master can configure two alert roles in the Discord channel form',async()=>{const state={masters:[{id:'parent-a',name:'Adi community',licensed:true,enabled:1,access_mode:'manual',monthly_cents:2500,invite_url:'https://copier.example/#join/invite',source:null,members:[],discord_requested_channel:'456',discord_role_ids:['123']}],memberships:[],master_license_active:true};const{dom,w,calls}=await setup(true,{demo:false});try{const original=w.fetch;w.fetch=async(url,opt={})=>url==='/api/community'?{ok:true,status:200,json:async()=>structuredClone(state)}:original(url,opt);w.location.hash='community';await tick();w.document.querySelector('[data-action="community-channel"]').click();await tick();const form=w.document.querySelector('#community-channel-form');assert.equal(form.elements.namedItem('discord_roles').value,'123');form.elements.namedItem('discord_roles').value='123, 789';form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();const sent=calls.find(c=>c.url==='/api/communities/parent-a/channel');assert.deepEqual(JSON.parse(sent.opt.body),{discord_channel:'456',discord_role_ids:['123','789']});}finally{dom.window.close()}});
+
+test('verified follower chooses a gold symbol and confirms risk before starting', async () => {
+  const {dom, w, calls} = await setup(true, {demo: false});
+  const state = {
+    masters: [], directory: [], master_license_active: false,
+    memberships: [{
+      community_id: 'parent-a', name: 'Adi community', active: true, access_mode: 'manual',
+      bot: {account_id: 'child-account', guided: true, heartbeat: w.Date.now()/1000,
+        mode: 'demo', gold_symbols: ['XAUUSD', 'XAUUSDm'], risk_pct: 0.5},
+    }],
+  };
+  try {
+    const original = w.fetch;
+    w.fetch = async (url, opt = {}) => url === '/api/community'
+      ? {ok: true, status: 200, json: async () => structuredClone(state)}
+      : original(url, opt);
+    w.location.hash = 'community';
+    await tick();
+    assert.match(w.document.querySelector('.content').textContent, /Account verified/);
+    w.document.querySelector('[data-action="community-review-risk"]').click();
+    await tick();
+    const form = w.document.querySelector('#guided-start-form');
+    form.elements.namedItem('risk_pct').value = '0.25';
+    form.elements.namedItem('symbol').value = 'XAUUSDm';
+    form.dispatchEvent(new w.Event('submit', {bubbles: true, cancelable: true}));
+    await tick();
+    const request = calls.find(call => call.url === '/api/communities/parent-a/start');
+    assert.deepEqual(JSON.parse(request.opt.body), {risk_pct: 0.25, symbol: 'XAUUSDm'});
+  } finally {
+    dom.window.close();
+  }
+});

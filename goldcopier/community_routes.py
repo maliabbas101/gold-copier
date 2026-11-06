@@ -29,6 +29,15 @@ def install(app, store, vault, billing, base, user, paid, live, demo=False):
             raise ValueError(
                 "Hosted broker connections are not available yet. Your service administrator must finish hosting setup."
             )
+        if isinstance(body, M.GuidedMT5):
+            return dict(
+                data,
+                name="My MT5 account",
+                broker="Other MT5",
+                symbol="XAUUSD",
+                mode="auto",
+                hosting="managed",
+            )
         if isinstance(body, M.ExnessAccountInput):
             from .exness_api import signing_key, host
 
@@ -203,10 +212,36 @@ def install(app, store, vault, billing, base, user, paid, live, demo=False):
         )
         return {"account_id": ident}
 
+    @app.post("/api/communities/{cid}/directory")
+    def directory(cid: str, body: M.Toggle, current=Depends(user)):
+        licensed_owner(current, cid)
+        with store.db() as db:
+            db.execute(
+                "UPDATE communities SET listed=? WHERE id=?", (int(body.enabled), cid)
+            )
+        return {"ok": True}
+
+    @app.post("/api/communities/{cid}/start")
+    def start(cid: str, body: M.GuidedStart, current=Depends(user)):
+        with store.db() as db:
+            bot = db.execute(
+                "SELECT account_id FROM community_bots WHERE community_id=? AND user_id=?",
+                (cid, current["id"]),
+            ).fetchone()
+        if not bot or not bot["account_id"]:
+            raise ValueError("Connect your MT5 account first")
+        store.set_enabled(
+            current["id"], bot["account_id"], True, live, paid, setup=body
+        )
+        return {"ok": True}
+
     @app.post("/api/communities/{cid}/child-bot")
     def child(
-        cid: str, body: M.AccountInput | M.ExnessAccountInput, current=Depends(user)
+        cid: str,
+        body: M.GuidedMT5 | M.AccountInput | M.ExnessAccountInput,
+        current=Depends(user),
     ):
+        guided = isinstance(body, M.GuidedMT5)
         data = account_data(body, "follower")
         account_id = uuid.uuid4().hex
         secret = vault.encrypt(data["password"], account_id)
@@ -259,7 +294,8 @@ def install(app, store, vault, billing, base, user, paid, live, demo=False):
             )
             # Explicit user-entered broker gold symbol; additional pair mappings use the normal owned-account screen.
             if (
-                data["symbol"].startswith("XAUUSD")
+                not guided
+                and data["symbol"].startswith("XAUUSD")
                 and db.execute(
                     "SELECT 1 FROM pairs WHERE symbol='XAUUSD' AND enabled=1"
                 ).fetchone()
@@ -281,8 +317,8 @@ def install(app, store, vault, billing, base, user, paid, live, demo=False):
                 (account_id, c["analyst_id"]),
             )
             db.execute(
-                "UPDATE community_bots SET account_id=?,desired_enabled=1,auto_start=1 WHERE id=?",
-                (account_id, bot["id"]),
+                "UPDATE community_bots SET account_id=?,desired_enabled=?,auto_start=?,guided=? WHERE id=?",
+                (account_id, int(not guided), int(not guided), int(guided), bot["id"]),
             )
             store.event(
                 db,

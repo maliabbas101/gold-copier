@@ -33,6 +33,17 @@ class AccountInput(Model):
     consent: Literal[True]
 
 
+class GuidedMT5(Model):
+    login: str = Field(pattern=r"^\d{3,20}$")
+    server: str = Field(min_length=2, max_length=100)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class GuidedStart(Model):
+    risk_pct: float = Field(gt=0, le=2)
+    symbol: str | None = Field(default=None, max_length=32)
+
+
 class Risk(Model):
     sizing: Literal["percent", "cash", "fixed"] = "percent"
     risk_pct: float = Field(default=0.5, gt=0, le=2)

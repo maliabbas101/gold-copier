@@ -1,6 +1,7 @@
 """Master-owned communities, subscriber entitlements and isolated child bots."""
 
 import json
+import re
 import secrets
 import time
 import uuid
@@ -13,6 +14,12 @@ def migrate(db):
     CREATE TABLE IF NOT EXISTS community_memberships(community_id TEXT NOT NULL,user_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',blocked INTEGER NOT NULL DEFAULT 0,period_end REAL,customer TEXT,billing_subscription TEXT UNIQUE,expected_cents INTEGER NOT NULL,checkout_key TEXT NOT NULL,checkout_id TEXT,checkout_url TEXT,created REAL NOT NULL,PRIMARY KEY(community_id,user_id));
     CREATE TABLE IF NOT EXISTS community_bots(id TEXT PRIMARY KEY,community_id TEXT NOT NULL,user_id TEXT NOT NULL,account_id TEXT UNIQUE,desired_enabled INTEGER NOT NULL DEFAULT 1,auto_start INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL,UNIQUE(community_id,user_id));
     """)
+
+    for table, column in (("communities", "listed"), ("community_bots", "guided")):
+        if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+            )
 
     from .community_discord import migrate as discord_migrate
 
@@ -228,13 +235,28 @@ def pause_bots(db, community_id, user_id):
     )
 
 
+def gold_candidates(snapshot):
+    matches = sorted(
+        {
+            name
+            for name in snapshot.get("instruments", [])
+            if re.fullmatch(
+                r"(?:XAUUSD[A-Za-z0-9._-]*|GOLD(?:[._-][A-Za-z0-9._-]+|[mc])?)",
+                name,
+                re.I,
+            )
+        }
+    )
+    return matches
+
+
 def auto_start(store, account_id, billing, allow_live):
     with store.db() as db:
         db.execute("BEGIN IMMEDIATE")
         b = db.execute(
             "SELECT * FROM community_bots WHERE account_id=?", (account_id,)
         ).fetchone()
-        if not b or not b["auto_start"] or not b["desired_enabled"]:
+        if not b or b["guided"] or not b["auto_start"] or not b["desired_enabled"]:
             return
         ok, _ = entry_access(db, account_id, billing)
         a = db.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
@@ -320,13 +342,20 @@ def view(store, user_id, billing, base):
                 else None
             )
             bot = db.execute(
-                "SELECT b.*,a.id connected_account_id,a.created connection_created,a.name account_name,a.enabled,a.heartbeat,a.disconnected,a.snapshot FROM community_bots b LEFT JOIN accounts a ON a.id=b.account_id WHERE b.community_id=? AND b.user_id=?",
+                "SELECT b.*,a.id connected_account_id,a.created connection_created,a.name account_name,a.enabled,a.heartbeat,a.disconnected,a.snapshot,a.mode,a.risk FROM community_bots b LEFT JOIN accounts a ON a.id=b.account_id WHERE b.community_id=? AND b.user_id=?",
                 (m["community_id"], user_id),
             ).fetchone()
             if bot:
                 m["bot"] = {k: v for k, v in dict(bot).items() if k != "snapshot"}
                 m["bot"]["account_id"] = bot["connected_account_id"]
-                m["bot"]["error"] = json.loads(bot["snapshot"] or "{}").get("error")
+                snapshot = json.loads(bot["snapshot"] or "{}")
+                m["bot"].pop("risk")
+                m["bot"]["error"] = snapshot.get("error")
+                if bot["guided"]:
+                    m["bot"]["gold_symbols"] = gold_candidates(snapshot)
+                    m["bot"]["risk_pct"] = json.loads(bot["risk"] or "{}").get(
+                        "risk_pct", 0.5
+                    )
             else:
                 m["bot"] = None
             memberships.append(m)
@@ -337,6 +366,20 @@ def view(store, user_id, billing, base):
             "software_plan": software["plan"] if software else "free",
             "software_status": software["status"] if software else "inactive",
             "masters": masters,
+            "directory": [
+                {
+                    "name": row["name"],
+                    "access_mode": row["access_mode"],
+                    "monthly_cents": row["monthly_cents"],
+                    "invite": row["invite_token"],
+                }
+                for row in db.execute(
+                    "SELECT * FROM communities WHERE listed=1 AND enabled=1 AND owner_id!=? ORDER BY name",
+                    (user_id,),
+                )
+                if master_licensed(db, row["owner_id"], billing)
+                and not any(m["community_id"] == row["id"] for m in memberships)
+            ],
             "memberships": memberships,
             "master_license_active": master_licensed(db, user_id, billing),
             "payments_enabled": billing,

@@ -4,7 +4,7 @@
 
 A is a master trader who purchases the platform's Pro software subscription. In **Community**, A creates a community, connects their master broker account once, chooses a Discord output channel, and shares their subscriber invite. **Connect Discord** uses Discord's hosted authorization page and verifies that A owns or manages the destination server. The shared output bot cannot be pointed at an unrelated server just by pasting its channel ID.
 
-B opens A's invitation and creates a personal login. In paid communities B subscribes through hosted checkout; in approval communities A explicitly grants access. Once access is active, a private child bot is generated. B connects their own broker account once, chooses their risk settings, and the hosted worker starts copying after a healthy broker connection. A sees membership and connection status, not B's broker credentials. Each child has a separate account token, execution ledger, and broker session; it is an isolated running worker, not a downloadable bot build.
+B opens A's invitation and creates a personal login. In paid communities B subscribes through hosted checkout; in approval communities A explicitly grants access. Once access is active, a private child bot is generated. B enters their MT5 server, login ID, and trading password. The hosted worker verifies the account type and reports its gold symbols. B confirms the symbol if several are available, sets risk per trade, and selects **Start copying**. The hosted worker keeps running when B closes the site. A sees membership and connection status, not B's broker credentials. Each child has a separate account token, execution ledger, and broker session; it is an isolated running worker, not a downloadable bot build.
 
 A continues trading in their normal MT5 terminal. The parent observer detects a new protected fill and queues child trades. Once at least one follower confirms successful execution, the server queues a Discord trade signal. Trades opened through the Exness app/web use this same path when they appear in the connected master account. If no follower executes, there is no Discord trade signal; skipped/rejected reasons appear in private Activity. A confirmation does not imply every follower filled. Discord is an output destination, so a Discord outage does not hold up copying. Neither A nor B retypes the trade into an operator form. CMP entries are priced using the follower broker's executable quote; no current-price number is required in a manual CMP message.
 
@@ -18,6 +18,8 @@ A continues trading in their normal MT5 terminal. The parent observer detects a 
 - Checkout redirects never grant access. A verified, signed webhook and an authoritative provider subscription read must agree on the community, customer, monthly amount, currency, and destination. Duplicate events are ignored.
 - An active membership creates a private child bot record. A can pause a member but cannot use the approval action to manufacture a paid entitlement in paid mode. B can open their own hosted billing portal.
 - Pausing, expiration, or cancellation blocks new entries at ingestion and worker claim. Existing copied positions can still receive management and close actions while their worker remains connected. Pausing does not liquidate broker positions.
+
+Masters can opt in to the trader directory from their dashboard. Followers can choose a listed master or use an invite that already selects one.
 
 ## One-time service deployment
 

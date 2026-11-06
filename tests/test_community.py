@@ -622,3 +622,86 @@ def test_master_configures_only_explicit_discord_roles(workspace):
         ).status_code
         == 400
     )
+
+
+def test_guided_follower_requires_verified_symbol_and_risk_before_start(
+    workspace, monkeypatch
+):
+    w = workspace
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "s" * 48)
+    cid, invite = create(w)
+    follower = login(w, "other@example.com", "another-test-password")
+    join(w, invite)
+    login(w)
+    grant(w, cid, follower)
+    login(w, "other@example.com", "another-test-password")
+    response = w.client.post(
+        f"/api/communities/{cid}/child-bot",
+        json={
+            "login": "222222",
+            "server": "Broker-Demo",
+            "password": "test-password",
+        },
+    )
+    assert response.status_code == 200, response.text
+    account = response.json()["account_id"]
+    start = f"/api/communities/{cid}/start"
+    assert w.client.post(start, json={"risk_pct": 0.25}).status_code == 400
+    token = w.store.rotate_agent(follower, account)
+    headers = {"Authorization": "Bearer " + token}
+    assert w.client.get("/api/worker/config", headers=headers).json()["mode"] == "auto"
+    snapshot = {
+        "login": "222222",
+        "server": "Broker-Demo",
+        "mode": "demo",
+        "balance": 10000,
+        "equity": 10000,
+        "currency": "USD",
+        "instruments": ["EURUSD", "XAUUSDm", "XAUUSD"],
+    }
+    assert (
+        w.client.post(
+            "/api/worker/heartbeat", headers=headers, json=snapshot
+        ).status_code
+        == 200
+    )
+    bot = w.client.get("/api/community").json()["memberships"][0]["bot"]
+    assert bot["guided"] and not bot["enabled"]
+    assert bot["mode"] == "demo" and bot["gold_symbols"] == ["XAUUSD", "XAUUSDm"]
+    assert (
+        w.client.post(
+            f"/api/accounts/{account}/enabled", json={"enabled": True}
+        ).status_code
+        == 400
+    )
+    assert w.client.post(start, json={"risk_pct": 0.25}).status_code == 400
+    assert (
+        w.client.post(start, json={"risk_pct": 0.25, "symbol": "EURUSD"}).status_code
+        == 400
+    )
+    response = w.client.post(start, json={"risk_pct": 0.25, "symbol": "XAUUSDm"})
+    assert response.status_code == 200, response.text
+    config = w.client.get("/api/worker/config", headers=headers).json()
+    assert config["enabled"] and config["risk"]["risk_pct"] == 0.25
+    assert config["pairs"][0]["broker_symbol"] == "XAUUSDm"
+    assert (
+        w.client.post(
+            "/api/worker/heartbeat", headers=headers, json=dict(snapshot, mode="live")
+        ).status_code
+        == 400
+    )
+
+
+def test_directory_displays_only_opted_in_masters(workspace):
+    w = workspace
+    cid, invite = create(w)
+    login(w, "other@example.com", "another-test-password")
+    assert w.client.get("/api/community").json()["directory"] == []
+    url = f"/api/communities/{cid}/directory"
+    assert w.client.post(url, json={"enabled": True}).status_code == 400
+    login(w)
+    assert w.client.post(url, json={"enabled": True}).status_code == 200
+    login(w, "other@example.com", "another-test-password")
+    assert w.client.get("/api/community").json()["directory"][0]["invite"] == invite
+    join(w, invite)
+    assert w.client.get("/api/community").json()["directory"] == []

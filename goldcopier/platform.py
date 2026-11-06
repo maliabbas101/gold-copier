@@ -794,14 +794,14 @@ def create_app():
             if not a:
                 raise ValueError("Hosted account not found")
             snap = json.loads(a["snapshot"] or "{}")
-            snap["error"] = body.error
+            snap["error"] = snap.get("error") or body.error
             if a["purpose"] == "master":
                 snap["source_status"] = body.error
             db.execute(
                 "UPDATE accounts SET enabled=0,heartbeat=0,snapshot=? WHERE id=?",
                 (json.dumps(snap), account_id),
             )
-            store.event(db, a["user_id"], "alert", body.error, account_id)
+            store.event(db, a["user_id"], "alert", snap["error"], account_id)
         return {"ok": True}
 
     @app.post(

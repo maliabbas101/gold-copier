@@ -312,9 +312,24 @@ class PlatformStore:
             ).fetchone()
             return dict(row) if row else None
 
-    def set_enabled(self, user, account_id, enabled, allow_live=False, billing=False):
+    def set_enabled(
+        self, user, account_id, enabled, allow_live=False, billing=False, setup=None
+    ):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
             a = self.account(user, account_id, db)
+            guided = db.execute(
+                "SELECT guided FROM community_bots WHERE account_id=?", (account_id,)
+            ).fetchone()
+            needs_setup = bool(guided and guided["guided"])
+            if enabled and needs_setup != (setup is not None):
+                raise ValueError(
+                    "Review your risk on the copy dashboard first"
+                    if needs_setup
+                    else "Setup is already complete"
+                )
+            if enabled and a["mode"] == "auto":
+                raise ValueError("Wait for the broker to verify your MT5 account")
             if enabled:
                 if a.get("purpose") == "master":
                     raise ValueError(
@@ -355,6 +370,42 @@ class PlatformStore:
                     (account_id,),
                 ).fetchone():
                     raise ValueError("Reconcile unresolved commands before starting")
+            if setup is not None:
+                from .community import gold_candidates
+
+                candidates = gold_candidates(snapshot)
+                symbol = setup.symbol or (
+                    candidates[0] if len(candidates) == 1 else None
+                )
+                if not candidates or symbol not in candidates:
+                    raise ValueError(
+                        "Choose a verified gold symbol from your broker account"
+                    )
+                if not db.execute(
+                    "SELECT 1 FROM pairs WHERE symbol='XAUUSD' AND enabled=1"
+                ).fetchone():
+                    raise ValueError("Gold copying is currently unavailable")
+                risk = json.loads(a["risk"])
+                risk.update(sizing="percent", risk_pct=setup.risk_pct)
+                db.execute(
+                    "UPDATE accounts SET symbol=?,risk=? WHERE id=?",
+                    (symbol, dump(risk), account_id),
+                )
+                db.execute(
+                    "INSERT INTO account_pairs VALUES(?,?,?,?,?,?,1) ON CONFLICT(account_id,pair) DO UPDATE SET broker_symbol=excluded.broker_symbol,enabled=1",
+                    (
+                        account_id,
+                        "XAUUSD",
+                        symbol,
+                        risk["max_spread"],
+                        risk["max_entry_distance"],
+                        risk["max_lots"],
+                    ),
+                )
+                db.execute(
+                    "UPDATE community_bots SET guided=0 WHERE account_id=?",
+                    (account_id,),
+                )
             db.execute(
                 "UPDATE accounts SET enabled=? WHERE id=?", (int(enabled), account_id)
             )
@@ -902,13 +953,13 @@ class PlatformStore:
         if (
             str(snapshot["login"]) != a["login"]
             or snapshot["server"] != a["server"]
-            or snapshot["mode"] != a["mode"]
+            or (a["mode"] != "auto" and snapshot["mode"] != a["mode"])
         ):
             raise ValueError("Worker account identity mismatch")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute(
-                "SELECT agent_hash,disconnected,snapshot,purpose FROM accounts WHERE id=?",
+                "SELECT agent_hash,disconnected,snapshot,purpose,mode FROM accounts WHERE id=?",
                 (a["id"],),
             ).fetchone()
             if (
@@ -917,6 +968,12 @@ class PlatformStore:
                 or current["agent_hash"] != a["agent_hash"]
             ):
                 raise ValueError("Worker authorization revoked")
+            if current["mode"] == "auto":
+                db.execute(
+                    "UPDATE accounts SET mode=? WHERE id=?", (snapshot["mode"], a["id"])
+                )
+            elif current["mode"] != snapshot["mode"]:
+                raise ValueError("Worker account mode changed")
             db.execute(
                 "UPDATE accounts SET snapshot=?,heartbeat=? WHERE id=?",
                 (dump(snapshot), time.time(), a["id"]),
